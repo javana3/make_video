@@ -137,4 +137,10 @@ hx-get="/runs/{{ project }}/{{ run_id }}/phase2_panel" hx-trigger="every 2s" hx-
   </div>
   {% endif %}
 
+  <!-- CLI/TUI fallback recorder — works whenever a planned command exists,
+       even if exec failed or services aren't healthy (covers CLI/library projects). -->
+  {% if cli_state and cli_state.planned_command %}
+  {% include "_phase_2_cli_recorder.html" %}
+  {% endif %}
+
 </div>

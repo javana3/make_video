@@ -1,0 +1,54 @@
+<!-- Phase 2B fallback: terminal recorder for projects without a web service.
+     Available whenever setup_plan.json exists. -->
+
+{% set cli_state = cli_state or {} %}
+{% set cli_rec_exists = cli_state.cli_recording_exists %}
+{% set cli_planned_cmd = cli_state.planned_command %}
+{% set cli_meta = cli_state.cli_meta %}
+
+<div class="rounded-lg border border-orange-700/40 bg-orange-950/15 px-5 py-4 space-y-3">
+  <div class="flex items-center gap-2">
+    <span class="text-base font-semibold text-orange-200">📺 CLI/TUI 终端录屏</span>
+    <span class="text-xs text-slate-500">非 web 项目（如 CLI 游戏、库 demo）走这条</span>
+  </div>
+
+  {% if not cli_rec_exists %}
+  <p class="text-xs text-slate-400">
+    跑 setup_plan 里第一条 service 命令 <code class="text-amber-300">{{ cli_planned_cmd }}</code>，
+    实时捕获 stdout/stderr，pyte 模拟终端 + PIL 渲染成 1920x1080 的暗色终端 mp4。
+  </p>
+  <form hx-post="/runs/{{ project }}/{{ run_id }}/record_cli" hx-target="#action-result" hx-swap="innerHTML">
+    <label class="block text-xs text-slate-500 mb-1">录屏时长（秒）</label>
+    <input type="number" name="duration_s" value="30" min="5" max="300" step="5"
+           class="w-32 bg-slate-950 border border-slate-700 focus:border-orange-500 rounded px-3 py-2 text-sm font-mono"/>
+    <button type="submit"
+            class="ml-2 inline-flex items-center gap-2 px-4 py-2 bg-orange-600 hover:bg-orange-500 text-white text-sm rounded font-semibold">
+      📺 录终端
+    </button>
+  </form>
+  {% else %}
+  <div class="text-sm text-slate-300">
+    ✅ 录屏完成：<span class="font-mono text-orange-300">cli_recording.mp4</span>
+    {% if cli_meta %}<span class="text-xs text-slate-500 ml-2">{{ "%.1f"|format(cli_meta.video_duration_s) }}s · {{ (cli_meta.video_size_bytes/1024/1024)|round(2) }} MB</span>{% endif %}
+  </div>
+  <video src="/runs/{{ project }}/{{ run_id }}/artifacts/recordings/cli_recording.mp4"
+         controls class="w-full max-h-[50vh] rounded border border-slate-700 bg-black"></video>
+  <div class="flex gap-2 flex-wrap">
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_cli" hx-target="#action-result" hx-swap="innerHTML">
+      <button type="submit"
+              class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded font-semibold"
+              hx-confirm="把 cli_recording.mp4 复制为 test.mp4？">
+        ✓ 接受为 test.mp4
+      </button>
+    </form>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/record_cli" hx-target="#action-result" hx-swap="innerHTML">
+      <input type="hidden" name="duration_s" value="30"/>
+      <button type="submit"
+              class="px-3 py-2 bg-amber-700 hover:bg-amber-600 text-white text-xs rounded font-semibold"
+              hx-confirm="重录覆盖？">
+        ↻ 重录
+      </button>
+    </form>
+  </div>
+  {% endif %}
+</div>

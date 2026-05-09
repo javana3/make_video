@@ -228,7 +228,12 @@ async def runs_new(request: Request,
         raise HTTPException(400, "mode must be 'url' or 'local'")
 
     project = _safe_project_name(project_name or derived)
-    pipe = Pipeline(project=project, launch_phoenix_ui=False)
+    # Generate run_id ourselves THEN cache via REGISTRY so the singleton instance
+    # is shared with later route handlers (otherwise each get_or_load creates a
+    # separate Pipeline whose in-memory state can drift from disk).
+    import uuid
+    run_id = uuid.uuid4().hex[:8]
+    pipe = REGISTRY.get_or_load(project, run_id)
     pipe.transition(phase=1, gate="running")
     set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
 
@@ -654,10 +659,12 @@ async def phase2_panel(project: str, run_id: str, request: Request):
             "state": demo_state,
         })
 
-    # 7. exec running / failed — show executing panel
+    # 7. exec running / failed — show executing panel + CLI recorder fallback
     if exec_state:
+        cli_state = _cli_state(run_dir)
         return TEMPLATES.TemplateResponse(request, "_phase_2_executing.html", {
             "project": project, "run_id": run_id, "exec_state": exec_state,
+            "cli_state": cli_state,
         })
 
     # 8. Plan exists, awaiting approval
@@ -1252,6 +1259,105 @@ async def accept_demo_route(project: str, run_id: str,
     label = {"zh": "中文字幕", "en": "English captions", "none": "无字幕"}[with_captions]
     return HTMLResponse(
         f'<div class="text-emerald-400 text-sm py-2">✅ 已采纳 ({label}) → recordings/test.mp4</div>',
+        headers={"HX-Trigger": "phase2-refresh"},
+    )
+
+
+# ────────────────────────────────────────────────────────────
+# Phase 2B · CLI/TUI Terminal Recorder (for non-web projects)
+# ────────────────────────────────────────────────────────────
+
+def _cli_state(run_dir: Path) -> dict:
+    """Aggregate CLI-recorder state for templates: planned_command + recording presence."""
+    plan_path = run_dir / "setup_plan.json"
+    cli_rec = run_dir / "recordings" / "cli_recording.mp4"
+    planned_cmd = ""
+    if plan_path.exists():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            services = plan.get("services") or []
+            if services:
+                planned_cmd = services[0].get("command", "")
+        except Exception:
+            pass
+    cli_meta = None
+    if cli_rec.exists():
+        # Lightweight: just read fs stats; the actual ffprobe was done at record-time
+        cli_meta = {
+            "video_size_bytes": cli_rec.stat().st_size,
+            "video_duration_s": 0,  # filled by ffprobe at render time; UI shows N/A if 0
+        }
+    return {
+        "planned_command": planned_cmd,
+        "cli_recording_exists": cli_rec.exists(),
+        "cli_meta": cli_meta,
+    }
+
+
+@app.post("/runs/{project}/{run_id}/record_cli", response_class=HTMLResponse)
+async def record_cli_route(project: str, run_id: str,
+                            duration_s: float = Form(30.0)):
+    """Run the planned service command + capture stdout → terminal-style mp4."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    plan_path = pipe.run_dir / "setup_plan.json"
+    if not plan_path.exists():
+        return HTMLResponse('<div class="text-rose-400 text-sm">缺 setup_plan.json</div>', 500)
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    services = plan.get("services") or []
+    if not services:
+        return HTMLResponse('<div class="text-rose-400 text-sm">setup_plan.json 没有 service 命令可跑</div>', 400)
+    s = services[0]
+    cmd_str = s.get("command", "")
+    cwd_rel = s.get("cwd", "./")
+    if not cmd_str:
+        return HTMLResponse('<div class="text-rose-400 text-sm">service.command 空</div>', 400)
+    import shlex
+    cmd_list = shlex.split(cmd_str)
+    # Resolve cwd relative to repo dir
+    repo_dir = pipe.run_dir / "repo"
+    cwd_abs = (repo_dir / cwd_rel).resolve() if cwd_rel != "./" else repo_dir
+
+    asyncio.create_task(_record_cli_async(pipe, cmd_list, cwd_abs, duration_s))
+    return HTMLResponse(
+        f'<div class="text-amber-300 text-sm py-2">⏳ 跑 <code>{cmd_str}</code> 在 <code>{cwd_abs.name}</code> 录屏 {duration_s}s（pyte 模拟终端 + PIL 渲染）...</div>',
+        headers={"HX-Trigger": "phase2-refresh"},
+    )
+
+
+async def _record_cli_async(pipe: Pipeline, cmd: list, cwd: Path, duration_s: float) -> None:
+    await REGISTRY.mark_running(pipe.run_id, "phase2b-cli-record")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..tools.cli_recorder import record_cli
+        out = pipe.run_dir / "recordings" / "cli_recording.mp4"
+        await asyncio.to_thread(
+            record_cli, cmd, cwd, out, duration_s, 15, 1920, 1080,
+        )
+    except Exception as e:
+        pipe.log.exception(f"record_cli failed: {e}")
+        pipe.bus.emit("asset_failed", agent="cli_recorder",
+                      error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+@app.post("/runs/{project}/{run_id}/accept_cli", response_class=HTMLResponse)
+async def accept_cli_route(project: str, run_id: str):
+    """Accept cli_recording.mp4 → recordings/test.mp4."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    rec_dir = pipe.run_dir / "recordings"
+    src = rec_dir / "cli_recording.mp4"
+    if not src.exists():
+        return HTMLResponse('<div class="text-rose-400 text-sm">cli_recording.mp4 不存在</div>', 400)
+    target = rec_dir / "test.mp4"
+    import shutil as _sh
+    await asyncio.to_thread(_sh.copy2, src, target)
+    pipe.record_asset("recording_test", target, verified=True, source="cli_recorder")
+    pipe.bus.emit("asset_verified", agent="pipeline", name="recording_test", path=str(target))
+    return HTMLResponse(
+        '<div class="text-emerald-400 text-sm py-2">✅ 已采纳 → recordings/test.mp4</div>',
         headers={"HX-Trigger": "phase2-refresh"},
     )
 
