@@ -1,52 +1,166 @@
 {% extends "base.html" %}
-{% block title %}Runs · Promo Video Pipeline{% endblock %}
+{% block title %}Promo Video Pipeline · Home{% endblock %}
 
 {% block content %}
-<div class="mb-8">
-  <h1 class="text-3xl font-bold tracking-tight">Pipeline Runs</h1>
-  <p class="text-slate-400 mt-1">所有运行实例。点进去查看 phase 进度、迭代产物。</p>
+
+<!-- Hero -->
+<div class="mb-10 text-center max-w-3xl mx-auto">
+  <h1 class="text-4xl font-bold tracking-tight bg-gradient-to-r from-indigo-300 via-purple-300 to-emerald-300 bg-clip-text text-transparent">
+    🎬 Promo Video Pipeline
+  </h1>
+  <p class="text-slate-400 mt-3 text-base">
+    把任意 GitHub 项目（或本地代码库）→ 30 秒 AI 宣传视频 · 5 phase × 6 agent 全自动 · 中英双语配音
+  </p>
 </div>
 
-{% if runs %}
-<div class="grid gap-3">
-  {% for r in runs %}
-  <a href="/runs/{{ r.project }}/{{ r.run_id }}"
-     class="group block rounded-lg border border-slate-800 hover:border-emerald-500/50 bg-slate-900/40 hover:bg-slate-900 px-5 py-4 transition">
-    <div class="flex items-start justify-between gap-4">
-      <div class="min-w-0 flex-1">
-        <div class="flex items-center gap-3 mb-1">
-          <span class="text-base font-semibold text-slate-100 group-hover:text-emerald-400 transition">
-            {{ r.project }}
-          </span>
-          <span class="font-mono text-xs px-2 py-0.5 bg-slate-800 rounded text-slate-400">
-            {{ r.run_id }}
-          </span>
-        </div>
-        <div class="flex items-center gap-4 text-xs text-slate-500">
-          <span>Phase <span class="text-slate-300 font-medium">{{ r.phase }}/5</span></span>
-          <span>Gate: <span class="font-mono text-slate-300">{{ r.gate }}</span></span>
-          <span>{{ r.manifest_count }} artifact(s)</span>
-        </div>
+<!-- Create new run · two-tab card -->
+<div class="max-w-3xl mx-auto mb-10 rounded-2xl border border-slate-800 bg-slate-900/60 backdrop-blur p-6 shadow-2xl">
+  <div class="flex items-center gap-2 mb-5">
+    <span class="text-lg font-semibold text-slate-100">🚀 新建 Run</span>
+    <span class="text-xs text-slate-500">输入项目源 → 自动 clone/copy → Phase 1 启动</span>
+  </div>
+
+  <!-- Tab buttons -->
+  <div class="flex gap-2 mb-5 border-b border-slate-800">
+    <button type="button" id="tab-url-btn"
+            class="px-4 py-2 -mb-px border-b-2 border-emerald-400 text-emerald-300 font-semibold text-sm">
+      🌐 GitHub URL
+    </button>
+    <button type="button" id="tab-local-btn"
+            class="px-4 py-2 -mb-px border-b-2 border-transparent text-slate-400 hover:text-slate-200 font-semibold text-sm">
+      📁 本地路径
+    </button>
+  </div>
+
+  <!-- Tab: URL -->
+  <form id="form-url" hx-post="/runs/new" hx-target="#form-result"
+        hx-disabled-elt="find button[type=submit]"
+        class="space-y-3">
+    <input type="hidden" name="mode" value="url"/>
+    <div>
+      <label class="text-xs text-slate-500 font-medium">GitHub URL</label>
+      <input name="repo_url" required type="url"
+             placeholder="https://github.com/streamlit/streamlit-hello"
+             class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none font-mono"/>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div class="md:col-span-2">
+        <label class="text-xs text-slate-500 font-medium">项目名（可选，默认从 URL 末段推）</label>
+        <input name="project_name" type="text"
+               placeholder="streamlit-hello"
+               class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 focus:outline-none"/>
       </div>
-      <div class="flex flex-col items-end gap-1">
-        {% if r.gate == 'done' %}
-          <span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">done</span>
-        {% elif r.gate.startswith('waiting_') %}
-          <span class="px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-300 border border-amber-500/40">waiting</span>
-        {% else %}
-          <span class="px-2 py-0.5 rounded text-xs bg-sky-500/20 text-sky-300 border border-sky-500/40">running</span>
-        {% endif %}
+      <div class="flex items-end">
+        <button type="submit"
+                class="w-full px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm rounded-lg font-semibold disabled:opacity-50">
+          Clone + 启 Phase 1
+        </button>
       </div>
     </div>
-  </a>
-  {% endfor %}
+  </form>
+
+  <!-- Tab: Local -->
+  <form id="form-local" hx-post="/runs/new" hx-target="#form-result"
+        hx-disabled-elt="find button[type=submit]"
+        class="space-y-3 hidden">
+    <input type="hidden" name="mode" value="local"/>
+    <div>
+      <label class="text-xs text-slate-500 font-medium">本地路径（项目根目录的绝对路径）</label>
+      <input name="local_path" required type="text"
+             placeholder="C:\Users\you\projects\my-project"
+             class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-purple-500 focus:outline-none font-mono"/>
+      <p class="text-xs text-slate-600 mt-1">
+        会复制整个目录到 <code class="text-slate-400">workspace/&lt;project&gt;/runs/&lt;run_id&gt;/repo/</code>，
+        自动跳过 <code class="text-slate-400">.git / .venv / node_modules / __pycache__</code> 等。
+      </p>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div class="md:col-span-2">
+        <label class="text-xs text-slate-500 font-medium">项目名（可选，默认从目录名推）</label>
+        <input name="project_name" type="text"
+               placeholder="my-project"
+               class="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm focus:border-purple-500 focus:outline-none"/>
+      </div>
+      <div class="flex items-end">
+        <button type="submit"
+                class="w-full px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded-lg font-semibold disabled:opacity-50">
+          Copy + 启 Phase 1
+        </button>
+      </div>
+    </div>
+  </form>
+
+  <!-- Result placeholder (HTMX swap target) -->
+  <div id="form-result" class="mt-3"></div>
 </div>
-{% else %}
-<div class="rounded-lg border border-slate-800 bg-slate-900/40 px-6 py-12 text-center">
-  <p class="text-slate-400">还没有 run。先用 CLI 启动一个：</p>
-  <code class="mt-3 inline-block px-3 py-1.5 bg-slate-800 rounded text-emerald-300 text-sm">
-    python -m src analyze https://github.com/&lt;owner&gt;/&lt;repo&gt;
-  </code>
+
+<!-- Existing runs -->
+<div class="max-w-5xl mx-auto">
+  <div class="flex items-baseline justify-between mb-4">
+    <h2 class="text-xl font-semibold tracking-tight text-slate-200">已有 Runs</h2>
+    <span class="text-xs text-slate-500">{{ runs|length }} run(s)</span>
+  </div>
+
+  {% if runs %}
+  <div class="grid gap-3">
+    {% for r in runs %}
+    <a href="/runs/{{ r.project }}/{{ r.run_id }}"
+       class="group block rounded-xl border border-slate-800 hover:border-emerald-500/50 bg-slate-900/40 hover:bg-slate-900 px-5 py-4 transition">
+      <div class="flex items-start justify-between gap-4">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-3 mb-1">
+            <span class="text-base font-semibold text-slate-100 group-hover:text-emerald-400 transition">
+              {{ r.project }}
+            </span>
+            <span class="font-mono text-xs px-2 py-0.5 bg-slate-800 rounded text-slate-400">
+              {{ r.run_id }}
+            </span>
+          </div>
+          <div class="flex items-center gap-4 text-xs text-slate-500">
+            <span>Phase <span class="text-slate-300 font-medium">{{ r.phase }}/5</span></span>
+            <span>Gate: <span class="font-mono text-slate-300">{{ r.gate }}</span></span>
+            <span>{{ r.manifest_count }} artifact(s)</span>
+          </div>
+        </div>
+        <div class="flex flex-col items-end gap-1">
+          {% if r.gate == 'done' %}
+            <span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">done</span>
+          {% elif r.gate.startswith('waiting_') %}
+            <span class="px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-300 border border-amber-500/40">waiting</span>
+          {% else %}
+            <span class="px-2 py-0.5 rounded text-xs bg-sky-500/20 text-sky-300 border border-sky-500/40">running</span>
+          {% endif %}
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="rounded-xl border border-slate-800 bg-slate-900/40 px-6 py-8 text-center">
+    <p class="text-slate-500 text-sm">还没有 run。用上面的表单创建第一个吧 ☝️</p>
+  </div>
+  {% endif %}
 </div>
-{% endif %}
+
+<script>
+  // Tab switching
+  const urlTab = document.getElementById('tab-url-btn');
+  const localTab = document.getElementById('tab-local-btn');
+  const urlForm = document.getElementById('form-url');
+  const localForm = document.getElementById('form-local');
+  function setActive(activeBtn, inactiveBtn) {
+    activeBtn.classList.add('border-emerald-400', 'text-emerald-300');
+    activeBtn.classList.remove('border-transparent', 'text-slate-400');
+    inactiveBtn.classList.remove('border-emerald-400', 'text-emerald-300');
+    inactiveBtn.classList.add('border-transparent', 'text-slate-400');
+  }
+  urlTab.addEventListener('click', () => {
+    urlForm.classList.remove('hidden'); localForm.classList.add('hidden');
+    setActive(urlTab, localTab);
+  });
+  localTab.addEventListener('click', () => {
+    localForm.classList.remove('hidden'); urlForm.classList.add('hidden');
+    setActive(localTab, urlTab);
+  });
+</script>
 {% endblock %}

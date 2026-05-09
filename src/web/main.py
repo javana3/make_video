@@ -161,6 +161,121 @@ async def index(request: Request):
     })
 
 
+_PROJECT_NAME_RE = __import__("re").compile(r"[^A-Za-z0-9._-]+")
+
+
+def _safe_project_name(raw: str) -> str:
+    name = _PROJECT_NAME_RE.sub("-", raw.strip().strip("/"))
+    name = name.strip("-")[:64]
+    return name or "run"
+
+
+@app.post("/runs/new", response_class=HTMLResponse)
+async def runs_new(request: Request,
+                    mode: str = Form(...),
+                    repo_url: str = Form(""),
+                    local_path: str = Form(""),
+                    project_name: str = Form("")):
+    """Create a new run from either GitHub URL or local path.
+
+    mode = "url" → git clone --depth=1
+    mode = "local" → copytree (skips .git, .venv, node_modules, workspace)
+    Then auto-trigger Phase 1 (Agent 1 ProjectAnalyzer) in background.
+    """
+    import shutil
+    from ..tools.shell import run as shell_run
+
+    if mode == "url":
+        if not repo_url.strip():
+            raise HTTPException(400, "repo_url required for mode=url")
+        url = repo_url.strip()
+        derived = url.rstrip("/").split("/")[-1].removesuffix(".git")
+    elif mode == "local":
+        if not local_path.strip():
+            raise HTTPException(400, "local_path required for mode=local")
+        src_path = Path(local_path.strip()).expanduser().resolve()
+        if not src_path.exists() or not src_path.is_dir():
+            raise HTTPException(400, f"local_path does not exist or is not a directory: {src_path}")
+        derived = src_path.name
+    else:
+        raise HTTPException(400, "mode must be 'url' or 'local'")
+
+    project = _safe_project_name(project_name or derived)
+    pipe = Pipeline(project=project, launch_phoenix_ui=False)
+    pipe.transition(phase=1, gate="running")
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+
+    repo_dir = pipe.run_dir / "repo"
+
+    try:
+        if mode == "url":
+            pipe.log.info(f"cloning {url} → {repo_dir}")
+            await asyncio.to_thread(
+                shell_run,
+                ["git", "clone", "--depth=1", url, str(repo_dir)],
+                timeout=600, check=True,
+            )
+            pipe.record_asset("repo", repo_dir, verified=True, url=url, source="git_clone")
+        else:
+            pipe.log.info(f"copying {src_path} → {repo_dir}")
+            ignore = shutil.ignore_patterns(
+                ".git", ".venv", "venv", "node_modules", "__pycache__",
+                ".pytest_cache", "build", "dist", ".tox", ".mypy_cache",
+                ".idea", ".vscode", "*.pyc", "*.pyo",
+            )
+            await asyncio.to_thread(shutil.copytree, str(src_path), str(repo_dir), ignore=ignore, dirs_exist_ok=False)
+            pipe.record_asset("repo", repo_dir, verified=True, source="local_copy",
+                              source_path=str(src_path))
+    except Exception as e:
+        pipe.log.exception(f"repo prep failed: {e}")
+        pipe.bus.emit("asset_failed", agent="pipeline",
+                      name="repo", error=str(e), error_type=type(e).__name__)
+        return HTMLResponse(
+            f'<div class="text-rose-400 text-sm p-4">'
+            f'❌ {("clone" if mode == "url" else "copy")} 失败: {type(e).__name__}: {e}</div>',
+            status_code=500,
+        )
+
+    # Kick off Phase 1 Agent 1 in background
+    asyncio.create_task(_run_analyzer_async(pipe, repo_url_or_path=(url if mode == "url" else str(src_path))))
+
+    # Redirect to run page (HTMX-friendly via HX-Redirect header, plus regular Location)
+    target = f"/runs/{project}/{pipe.run_id}"
+    return HTMLResponse(
+        f'<div class="text-emerald-400 text-sm p-4">'
+        f'✅ Run created: <code>{project}/{pipe.run_id}</code> · Phase 1 Agent 1 启动中...<br>'
+        f'<a class="underline" href="{target}">→ 查看 run 进度</a></div>',
+        headers={"HX-Redirect": target, "Location": target},
+    )
+
+
+async def _run_analyzer_async(pipe: Pipeline, repo_url_or_path: str) -> None:
+    """Phase 1: invoke Agent 1 ProjectAnalyzer."""
+    await REGISTRY.mark_running(pipe.run_id, "phase1-analyze")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..agents.project_analyzer import run_project_analyzer
+        repo_dir = pipe.run_dir / "repo"
+        brief_path = pipe.run_dir / "project_brief.md"
+        progress_path = pipe.run_dir / "progress.json"
+        await asyncio.to_thread(
+            run_project_analyzer,
+            repo_dir=repo_dir,
+            repo_url=repo_url_or_path,
+            output_path=brief_path,
+            mode="standard",
+            progress_path=progress_path,
+        )
+        pipe.record_asset("project_brief", brief_path, verified=True)
+        pipe.transition(phase=1, gate="waiting_brief_approval")
+    except Exception as e:
+        pipe.log.exception(f"analyzer failed: {e}")
+        pipe.bus.emit("asset_failed", agent="Agent 1 ProjectAnalyzer",
+                      error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
 @app.get("/runs/{project}/{run_id}", response_class=HTMLResponse)
 async def view_run(project: str, run_id: str, request: Request):
     pipe = REGISTRY.get_or_load(project, run_id)
