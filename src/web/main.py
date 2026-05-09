@@ -76,7 +76,7 @@ class _Registry:
             self._pipelines[key] = Pipeline(
                 project=project, run_id=run_id,
                 workspace_root=WORKSPACE_ROOT,
-                launch_phoenix_ui=False,
+                launch_observability_ui=False,
             )
         return self._pipelines[key]
 
@@ -349,7 +349,7 @@ async def view_run(project: str, run_id: str, request: Request):
         "state": state,
         "phase_ctx": phase_ctx,
         "phase_label": _phase_label(state.phase),
-        "phoenix_url": "http://localhost:6006",
+        "langfuse_url": "http://localhost:3000",
         "agent_running": REGISTRY.is_running(run_id),
         "run_dir": str(pipe.run_dir),
         "phase3_state": phase3_state,
@@ -686,6 +686,7 @@ async def phase2_panel(project: str, run_id: str, request: Request):
             "windows": windows,
             "exec_state": exec_state,
             "state": demo_state,
+            **_driver_context(run_dir),
         })
 
     # 7. exec running / failed — show executing panel + CLI recorder fallback
@@ -694,6 +695,7 @@ async def phase2_panel(project: str, run_id: str, request: Request):
         return TEMPLATES.TemplateResponse(request, "_phase_2_executing.html", {
             "project": project, "run_id": run_id, "exec_state": exec_state,
             "cli_state": cli_state,
+            **_driver_context(run_dir),
         })
 
     # 8. Plan exists, awaiting approval
@@ -1065,7 +1067,7 @@ async def observability_global(request: Request):
         })
     return TEMPLATES.TemplateResponse(request, "observability_global.html", {
         "runs": runs_data,
-        "phoenix_url": "http://localhost:6006/",
+        "langfuse_url": "http://localhost:3000/",
     })
 
 
@@ -1080,7 +1082,7 @@ async def observability_page(project: str, run_id: str, request: Request):
         "events": events,
         "summary": summary,
         "log_files": log_files,
-        "phoenix_url": "http://localhost:6006/",
+        "langfuse_url": "http://localhost:3000/",
     })
 
 
@@ -1328,7 +1330,7 @@ async def _run_phase3_async(pipe: Pipeline) -> None:
             raise RuntimeError("recordings/test.mp4 missing — Phase 2 not done")
         brief = (run_dir / "project_brief.md").read_text(encoding="utf-8")
 
-        # Probe recording
+        # Probe the demo recording
         probe = await asyncio.to_thread(shell_run, [
             ffprobe(), "-v", "quiet", "-print_format", "json",
             "-show_streams", "-show_format", str(recording),
@@ -1342,12 +1344,63 @@ async def _run_phase3_async(pipe: Pipeline) -> None:
             "codec": v["codec_name"], "fps": v["r_frame_rate"],
         }
 
+        # Scan OpenDesigner outputs into available_assets
+        hyperframes = []
+        hyperframes_dir = run_dir / "hyperframes"
+        if hyperframes_dir.exists():
+            for mp4 in sorted(hyperframes_dir.glob("*.mp4")):
+                try:
+                    hp = await asyncio.to_thread(shell_run, [
+                        ffprobe(), "-v", "quiet", "-print_format", "json",
+                        "-show_streams", "-show_format", str(mp4),
+                    ], check=True)
+                    hd = json.loads(hp.stdout)
+                    hv = next((s for s in hd["streams"] if s["codec_type"] == "video"), {})
+                    rel = str(mp4.relative_to(run_dir)).replace("\\", "/")
+                    hyperframes.append({
+                        "source_path": rel,
+                        "duration_s": float(hd["format"].get("duration", 0)),
+                        "width": int(hv.get("width", 0)),
+                        "height": int(hv.get("height", 0)),
+                    })
+                except Exception:
+                    continue
+
+        html_pages = []
+        html_dir = run_dir / "html_asset"
+        if html_dir.exists():
+            for html in sorted(html_dir.glob("*.html")):
+                rel = str(html.relative_to(run_dir)).replace("\\", "/")
+                # crude title extraction
+                title = ""
+                try:
+                    text = html.read_text(encoding="utf-8", errors="replace")
+                    import re as _re
+                    m = _re.search(r"<title[^>]*>([^<]+)</title>", text, _re.I)
+                    if m:
+                        title = m.group(1).strip()
+                except Exception:
+                    pass
+                html_pages.append({"source_path": rel, "title": title})
+
+        captions_rel = None
+        cap_path = run_dir / "demo_captions.jsonl"
+        if cap_path.exists() and cap_path.stat().st_size > 0:
+            captions_rel = "demo_captions.jsonl"
+
+        available_assets = {
+            "recording": recording_meta,
+            "hyperframes": hyperframes,
+            "html_pages": html_pages,
+            "captions_path": captions_rel,
+        }
+
         # M3a · cutting plan
         plan_path = run_dir / "cutting_plan.json"
         await asyncio.to_thread(
             run_cutting_planner,
             run_dir=run_dir, project_brief=brief,
-            recording_meta=recording_meta, output_path=plan_path,
+            available_assets=available_assets, output_path=plan_path,
             progress_path=run_dir / "progress.json",
         )
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -1356,7 +1409,10 @@ async def _run_phase3_async(pipe: Pipeline) -> None:
         num, den = recording_meta["fps"].split("/")
         src_fps = max(1, round(int(num) / int(den)))
         remotion_dir = run_dir / "remotion"
-        await asyncio.to_thread(generate_project, plan, remotion_dir, recording, src_fps=src_fps)
+        await asyncio.to_thread(generate_project, plan, remotion_dir, recording,
+                                 src_fps=src_fps,
+                                 hyperframes_dir=(hyperframes_dir if hyperframes else None),
+                                 html_dir=(html_dir if html_pages else None))
 
         # M3b · npm install (skipped if package-lock.json + node_modules exist)
         if not (remotion_dir / "node_modules").exists():
@@ -1618,6 +1674,235 @@ async def accept_cli_route(project: str, run_id: str):
     pipe.transition(phase=3, gate="running")
     return HTMLResponse(
         '<div class="text-emerald-400 text-sm py-2">✅ 已采纳 → Phase 3</div>',
+        headers={"HX-Trigger": "phase-refresh"},
+    )
+
+
+# ────────────────────────────────────────────────────────────
+# Demo Driver — autonomous-agent project demonstrator (Phase 2c)
+# Replaces the old fixed-duration cli/web recorder.
+# ────────────────────────────────────────────────────────────
+
+def _driver_context(run_dir: Path) -> dict:
+    """Read demo_driver_progress.json + check demo.mp4 for template context."""
+    p = run_dir / "demo_driver_progress.json"
+    progress: dict = {"status": "not_started"}
+    if p.exists():
+        try:
+            progress = json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            progress = {"status": "error", "error": "progress.json unparseable"}
+    return {
+        "driver_progress": progress,
+        "demo_recording_exists": (run_dir / "recordings" / "demo.mp4").exists(),
+    }
+
+
+def _detect_demo_mode(plan: dict) -> tuple[str, Optional[str], Optional[list], Optional[str]]:
+    """Heuristic: if first service has health_url it's web mode; else cli."""
+    services = plan.get("services") or []
+    if services:
+        s = services[0]
+        url = s.get("health_url") or ""
+        if url.startswith("http://"):
+            # Use the host:port root, not the health probe path
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            base = f"{p.scheme}://{p.netloc}/"
+            return "web", base, None, None
+        # service exists but no usable health_url → still try cli with its command
+        import shlex
+        return "cli", None, shlex.split(s.get("command") or ""), s.get("cwd") or "./"
+    # no services declared — undefined; UI will require user to pick
+    return "cli", None, None, "./"
+
+
+@app.post("/runs/{project}/{run_id}/run_demo_driver", response_class=HTMLResponse)
+async def run_demo_driver_route(project: str, run_id: str,
+                                  mode: Optional[str] = Form(None),
+                                  web_url: Optional[str] = Form(None),
+                                  cli_command: Optional[str] = Form(None),
+                                  cli_cwd: Optional[str] = Form(None)):
+    """Launch the Demo Driver agent as a background task.
+
+    Form fields are optional; missing fields are derived from setup_plan.json.
+    The agent operates the project autonomously (read source, decide what to
+    demo, drive the running app via browser/pty, emit captions, listen to
+    user feedback) until it calls finish_demo. NO duration cap.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    if REGISTRY.is_running(run_id):
+        return HTMLResponse(
+            '<div class="text-amber-400 text-sm">已有 Agent 在跑，等它结束</div>', 409)
+
+    plan_path = pipe.run_dir / "setup_plan.json"
+    plan = {}
+    if plan_path.exists():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except Exception:
+            plan = {}
+
+    # Auto-detect mode + targets if user didn't specify
+    auto_mode, auto_url, auto_cmd, auto_cwd = _detect_demo_mode(plan)
+    chosen_mode = mode or auto_mode
+    chosen_url = web_url or auto_url
+    if cli_command:
+        import shlex
+        chosen_cmd = shlex.split(cli_command)
+    else:
+        chosen_cmd = auto_cmd
+    chosen_cwd = cli_cwd or auto_cwd or "./"
+
+    if chosen_mode == "web" and not chosen_url:
+        return HTMLResponse(
+            '<div class="text-rose-400 text-sm">web 模式缺 URL（setup_plan 里没 health_url）</div>', 400)
+    if chosen_mode == "cli" and not chosen_cmd:
+        return HTMLResponse(
+            '<div class="text-rose-400 text-sm">cli 模式缺 command（setup_plan.services 为空，前端请填）</div>', 400)
+
+    # Read project_brief for tone context (NOT a checklist for demo content)
+    brief_path = pipe.run_dir / "project_brief.md"
+    brief = brief_path.read_text(encoding="utf-8") if brief_path.exists() else ""
+
+    repo_dir = pipe.run_dir / "repo"
+
+    # Reset live_feedback so the new run starts with a clean channel
+    fb_path = pipe.run_dir / "live_feedback.jsonl"
+    fb_path.write_text("", encoding="utf-8")
+
+    asyncio.create_task(_run_demo_driver_async(
+        pipe=pipe, repo_dir=repo_dir, project_brief=brief,
+        mode=chosen_mode, web_url=chosen_url,
+        cli_command=chosen_cmd,
+        cli_cwd=(repo_dir / chosen_cwd).resolve() if chosen_mode == "cli" else None,
+    ))
+
+    label = (f"web → {chosen_url}" if chosen_mode == "web"
+             else f"cli → {' '.join(chosen_cmd or [])}")
+    return HTMLResponse(
+        f'<div class="text-amber-300 text-sm py-2">'
+        f'⏳ Demo Driver 启动中 · {label} · 演完才停（无时长 cap）</div>',
+        headers={"HX-Trigger": "phase2-refresh"},
+    )
+
+
+async def _run_demo_driver_async(*, pipe: Pipeline, repo_dir: Path,
+                                  project_brief: str,
+                                  mode: str, web_url: Optional[str],
+                                  cli_command: Optional[list],
+                                  cli_cwd: Optional[Path]) -> None:
+    await REGISTRY.mark_running(pipe.run_id, "demo-driver")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..agents.demo_driver import run_demo_driver
+        await asyncio.to_thread(
+            run_demo_driver,
+            run_dir=pipe.run_dir,
+            repo_dir=repo_dir,
+            project_brief=project_brief,
+            mode=mode,
+            web_url=web_url,
+            cli_command=cli_command,
+            cli_cwd=cli_cwd,
+        )
+    except Exception as e:
+        pipe.log.exception(f"demo_driver failed: {e}")
+        pipe.bus.emit("asset_failed", agent="demo_driver",
+                       error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+@app.post("/runs/{project}/{run_id}/demo_driver/feedback", response_class=HTMLResponse)
+async def demo_driver_feedback_route(project: str, run_id: str,
+                                       text: str = Form(...)):
+    """Append a live-feedback entry the running driver agent will see on its next turn."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    if not text.strip():
+        return HTMLResponse('<div class="text-slate-500 text-xs">空消息忽略</div>', 200)
+    fb_path = pipe.run_dir / "live_feedback.jsonl"
+    fb_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"text": text.strip(),
+             "ts": datetime.now(timezone.utc).isoformat()}
+    with fb_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    pipe.bus.emit("user_input", agent="demo_driver", text=text.strip()[:500])
+    return HTMLResponse(
+        '<div class="text-emerald-400 text-xs py-1">✓ 已发送给 Driver（下一轮可见）</div>')
+
+
+@app.get("/runs/{project}/{run_id}/demo_driver/progress.json")
+async def demo_driver_progress(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    p = pipe.run_dir / "demo_driver_progress.json"
+    if not p.exists():
+        return {"phase": "2c-demo-driver", "status": "not_started"}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"phase": "2c-demo-driver", "status": "error", "error": str(e)}
+
+
+@app.get("/runs/{project}/{run_id}/demo_driver/captions")
+async def demo_driver_captions(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    p = pipe.run_dir / "demo_captions.jsonl"
+    if not p.exists():
+        return {"captions": []}
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return {"captions": out}
+
+
+@app.get("/runs/{project}/{run_id}/demo_driver/feedback_log")
+async def demo_driver_feedback_log(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    p = pipe.run_dir / "live_feedback.jsonl"
+    if not p.exists():
+        return {"feedback": []}
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return {"feedback": out}
+
+
+@app.post("/runs/{project}/{run_id}/accept_demo", response_class=HTMLResponse)
+async def accept_demo_route(project: str, run_id: str):
+    """Accept Demo Driver's recordings/demo.mp4 → recordings/test.mp4 and advance to Phase 3."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    rec_dir = pipe.run_dir / "recordings"
+    src = rec_dir / "demo.mp4"
+    if not src.exists():
+        return HTMLResponse('<div class="text-rose-400 text-sm">demo.mp4 不存在（Driver 还没跑完）</div>', 400)
+    target = rec_dir / "test.mp4"
+    import shutil as _sh
+    await asyncio.to_thread(_sh.copy2, src, target)
+    pipe.record_asset("recording_test", target, verified=True, source="demo_driver")
+    # Captions go forward as a separate asset for Phase 3 to consume
+    cap_src = pipe.run_dir / "demo_captions.jsonl"
+    if cap_src.exists():
+        pipe.record_asset("demo_captions", cap_src, verified=True, source="demo_driver")
+    pipe.bus.emit("asset_verified", agent="pipeline",
+                   name="recording_test", path=str(target))
+    pipe.transition(phase=3, gate="running")
+    return HTMLResponse(
+        '<div class="text-emerald-400 text-sm py-2">✅ 已采纳 Demo → Phase 3</div>',
         headers={"HX-Trigger": "phase-refresh"},
     )
 
@@ -1988,17 +2273,18 @@ async def _run_agent_for_phase(pipe: Pipeline, feedback: str,
 # ────────────────────────────────────────────────────────────
 
 def run_server(host: str = "127.0.0.1", port: int = 7860, reload: bool = False) -> None:
-    # Launch Phoenix once for the server lifetime so all web-triggered Agent
-    # runs are traced. Pipeline instances created via Registry use launch_ui=False,
-    # which is now a no-op (already initialized) but Anthropic SDK auto-instrument
-    # was activated here, so their LLM calls still emit spans into Phoenix.
+    # Configure OTLP → Langfuse once for the server lifetime so all web-triggered
+    # Agent runs export spans. Pipeline instances created via Registry use
+    # launch_ui=False, which is now a no-op (already initialized) but the
+    # Anthropic SDK auto-instrument was activated here, so their LLM calls
+    # still emit spans into Langfuse.
     if not reload:
-        from ..observability.tracer import phoenix_url
+        from ..observability.tracer import langfuse_url
         from ..observability.tracer import setup as setup_tracing
         setup_tracing(project_name="video-workflow-web", launch_ui=True)
-        print(f"Phoenix UI: {phoenix_url()}")
+        print(f"Langfuse UI: {langfuse_url()}")
     else:
-        print("⚠ --reload mode skips Phoenix launch (worker isolation). "
+        print("⚠ --reload mode skips OTLP setup (worker isolation). "
               "Restart without --reload to enable tracing.")
 
     import uvicorn

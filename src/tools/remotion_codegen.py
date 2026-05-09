@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from ..observability.audit import get_run_context, traced_agent
 from ..observability.logger import agent_logger
@@ -116,13 +116,43 @@ def _bg_jsx(bg: dict, scene_duration_s: float, src_fps: int) -> str:
         b = bg.get("gradient_to", a)
         return (f'<AbsoluteFill style={{{{background: "linear-gradient(135deg, {a} 0%, {b} 100%)"}}}} />')
     if t == "recording":
-        src = bg.get("source_path", "recording.mp4")
-        # source_path can be 'recordings/test.mp4' — copy to public/recording.mp4
-        # so we always reference 'recording.mp4'
+        # Always lives at public/recording.mp4 (caller copies)
         start_s = float(bg.get("start_in_source_s", 5.0))
         start_frames = int(start_s * src_fps)
         return (f'<Video src={{staticFile("recording.mp4")}} startFrom={{{start_frames}}} '
                 f'style={{{{width: "100%", height: "100%", objectFit: "cover"}}}} />')
+    if t == "hyperframe":
+        # source_path is e.g. "hyperframes/intro.mp4" — caller copies into
+        # public/hyperframes/<basename>.mp4 keeping basename
+        src = bg.get("source_path", "")
+        from os.path import basename as _bn
+        public_name = f"hyperframes/{_bn(src)}"
+        start_s = float(bg.get("start_in_source_s", 0.0))
+        # Hyperframes are usually 30fps; if Caller supplied something else they
+        # can override via src_fps but here we use 30 as a sane default since
+        # OpenDesigner exports at 30fps.
+        hyper_fps = 30
+        start_frames = int(start_s * hyper_fps)
+        return (f'<OffthreadVideo src={{staticFile("{public_name}")}} '
+                f'startFrom={{{start_frames}}} '
+                f'style={{{{width: "100%", height: "100%", objectFit: "cover"}}}} />')
+    if t == "html":
+        src = bg.get("source_path", "")
+        from os.path import basename as _bn
+        # html_asset/<file>.html → public/html_asset/<file>.html
+        public_name = f"html_asset/{_bn(src)}"
+        scroll_pct = float(bg.get("html_scroll_y_pct", 0))
+        zoom = float(bg.get("html_zoom", 1.0)) or 1.0
+        # Use a real <iframe> (not Remotion's IFrame) so onLoad can scroll
+        # the contentWindow. transform:scale gives zoom. Setting width/height
+        # to 100/zoom % ensures the scaled-up content still fills the viewport.
+        return (
+            '<HtmlBg '
+            f'src={{staticFile("{public_name}")}} '
+            f'scrollPct={{{scroll_pct}}} '
+            f'zoom={{{zoom}}} '
+            '/>'
+        )
     return '<AbsoluteFill style={{backgroundColor: "#000"}} />'
 
 
@@ -217,9 +247,43 @@ def _gen_myvideo_tsx(plan: dict, src_fps: int) -> str:
 
     body = "\n".join(parts)
     return (
-        'import { AbsoluteFill, Video, useCurrentFrame, interpolate, staticFile } from "remotion";\n'
+        'import { AbsoluteFill, Video, OffthreadVideo, useCurrentFrame, interpolate, staticFile } from "remotion";\n'
         'import { TransitionSeries, linearTiming } from "@remotion/transitions";\n'
         'import { fade } from "@remotion/transitions/fade";\n'
+        '\n'
+        '// HtmlBg — render an OpenDesigner HTML page as a live iframe background.\n'
+        '// scrollPct (0..100) = position into page height; zoom = CSS scale.\n'
+        'type HtmlBgProps = { src: string; scrollPct: number; zoom: number };\n'
+        'const HtmlBg: React.FC<HtmlBgProps> = (p) => {\n'
+        '  const onLoad = (ev: React.SyntheticEvent<HTMLIFrameElement>) => {\n'
+        '    try {\n'
+        '      const iframe = ev.currentTarget;\n'
+        '      const win = iframe.contentWindow;\n'
+        '      const doc = iframe.contentDocument;\n'
+        '      if (!win || !doc) return;\n'
+        '      const docH = doc.documentElement.scrollHeight;\n'
+        '      const visibleH = win.innerHeight || iframe.clientHeight;\n'
+        '      const max = Math.max(0, docH - visibleH);\n'
+        '      win.scrollTo(0, max * (p.scrollPct / 100));\n'
+        '    } catch (e) { /* same-origin only */ }\n'
+        '  };\n'
+        '  return (\n'
+        '    <AbsoluteFill style={{ overflow: "hidden", background: "#000" }}>\n'
+        '      <iframe\n'
+        '        src={p.src}\n'
+        '        onLoad={onLoad}\n'
+        '        style={{\n'
+        '          width: `${100 / p.zoom}%`,\n'
+        '          height: `${100 / p.zoom}%`,\n'
+        '          transform: `scale(${p.zoom})`,\n'
+        '          transformOrigin: "top left",\n'
+        '          border: "none",\n'
+        '          display: "block",\n'
+        '        }}\n'
+        '      />\n'
+        '    </AbsoluteFill>\n'
+        '  );\n'
+        '};\n'
         '\n'
         '// Helper: animated text element. Hooks at component top level (per\n'
         '// React rules of hooks). Used by every scene needing fade-in/out text.\n'
@@ -282,10 +346,23 @@ def total_frames(plan: dict) -> int:
 def generate_project(plan: dict,
                      remotion_dir: Path,
                      recording_path: Path,
-                     src_fps: int = 30) -> dict:
-    """Write the Remotion project to remotion_dir. Returns summary dict."""
+                     src_fps: int = 30,
+                     hyperframes_dir: Optional[Path] = None,
+                     html_dir: Optional[Path] = None) -> dict:
+    """Write the Remotion project to remotion_dir. Returns summary dict.
+
+    Assets copied into <remotion_dir>/public/:
+      recording.mp4               from recording_path
+      hyperframes/<basename>.mp4  from hyperframes_dir/*.mp4 (if provided)
+      html_asset/<basename>.*     from html_dir/* (if provided)
+    """
     log = agent_logger("agent3_remotion")
-    log.info(f"codegen → {remotion_dir}  scenes={len(plan.get('scenes', []))}  src_fps={src_fps}")
+    n_hyper = sum(1 for s in plan.get("scenes", [])
+                  if (s.get("background") or {}).get("type") == "hyperframe")
+    n_html = sum(1 for s in plan.get("scenes", [])
+                 if (s.get("background") or {}).get("type") == "html")
+    log.info(f"codegen → {remotion_dir}  scenes={len(plan.get('scenes', []))}  "
+             f"src_fps={src_fps}  hyperframe_scenes={n_hyper}  html_scenes={n_html}")
     remotion_dir.mkdir(parents=True, exist_ok=True)
     src_dir = remotion_dir / "src"
     public_dir = remotion_dir / "public"
@@ -300,10 +377,33 @@ def generate_project(plan: dict,
     (src_dir / "Root.tsx").write_text(_gen_root_tsx(plan, tf), encoding="utf-8")
     (src_dir / "MyVideo.tsx").write_text(_gen_myvideo_tsx(plan, src_fps), encoding="utf-8")
 
-    # Copy recording into public/ (Remotion's staticFile() resolves there)
+    # 1. Copy main recording to public/recording.mp4
     target_recording = public_dir / "recording.mp4"
     if recording_path.exists():
         shutil.copy2(recording_path, target_recording)
+
+    # 2. Copy hyperframe clips referenced by the plan
+    n_hyper_copied = 0
+    if hyperframes_dir and hyperframes_dir.exists():
+        public_hyper = public_dir / "hyperframes"
+        public_hyper.mkdir(exist_ok=True)
+        used = {Path((s.get("background") or {}).get("source_path", "")).name
+                for s in plan.get("scenes", [])
+                if (s.get("background") or {}).get("type") == "hyperframe"}
+        for src in sorted(hyperframes_dir.glob("*.mp4")):
+            if src.name in used:
+                shutil.copy2(src, public_hyper / src.name)
+                n_hyper_copied += 1
+
+    # 3. Copy html_asset dir (entire folder — html may reference local images/css)
+    n_html_copied = 0
+    if html_dir and html_dir.exists():
+        public_html = public_dir / "html_asset"
+        if public_html.exists():
+            shutil.rmtree(public_html)
+        # Copy whole tree so relative <img>/<link> still resolve
+        shutil.copytree(html_dir, public_html)
+        n_html_copied = sum(1 for _ in public_html.rglob("*.html"))
 
     summary = {
         "remotion_dir": str(remotion_dir),
@@ -311,13 +411,19 @@ def generate_project(plan: dict,
         "fps": plan["fps"],
         "duration_s": tf / plan["fps"],
         "scenes": len(plan["scenes"]),
+        "hyperframe_scenes": n_hyper,
+        "html_scenes": n_html,
+        "hyperframe_clips_copied": n_hyper_copied,
+        "html_files_copied": n_html_copied,
     }
-    log.info(f"codegen done: {summary['scenes']} scenes, {summary['total_frames']} frames "
-             f"@ {summary['fps']}fps = {summary['duration_s']:.1f}s")
+    log.info(f"codegen done: {summary['scenes']} scenes ({n_hyper} hyperframe, "
+             f"{n_html} html), {summary['total_frames']} frames @ {summary['fps']}fps "
+             f"= {summary['duration_s']:.1f}s")
     bus = get_run_context().get("event_bus")
     if bus is not None:
         bus.emit("asset_verified", agent="agent3_remotion",
                  name="remotion_project", path=str(remotion_dir),
                  total_frames=tf, fps=plan["fps"],
-                 duration_s=summary["duration_s"], scenes=summary["scenes"])
+                 duration_s=summary["duration_s"], scenes=summary["scenes"],
+                 hyperframe_scenes=n_hyper, html_scenes=n_html)
     return summary

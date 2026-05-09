@@ -137,10 +137,11 @@ hx-get="/runs/{{ project }}/{{ run_id }}/phase2_panel" hx-trigger="every 2s" hx-
   </div>
   {% endif %}
 
-  <!-- CLI/TUI fallback recorder — works whenever a planned command exists,
-       even if exec failed or services aren't healthy (covers CLI/library projects). -->
+  <!-- Demo Driver (Phase 2c) — autonomous agent. Works in both web (services up)
+       and cli (no services / library projects) modes; mode is auto-detected
+       from setup_plan.json or user-overridable in the form. -->
   {% if cli_state and cli_state.planned_command %}
-  {% include "_phase_2_cli_recorder.html" %}
+  {% include "_phase_2_demo_driver.html" %}
   {% endif %}
 
 </div>

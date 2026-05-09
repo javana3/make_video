@@ -23,16 +23,34 @@ from ..tools.llm import anthropic_client, model_for
 
 SYSTEM_PROMPT = """You are Agent 3 RemotionComposer in a promo-video production pipeline.
 
-Phase 1 (project_brief) and Phase 2 (services + recording) are done. Your job
-in Phase 3a: design a CUTTING PLAN for a 30–60 second promo video.
+Phase 1 (project_brief), Phase 2 (Demo Driver recording of the project actually
+running), and OpenDesigner (hyperframes / html design assets) are done.
+Your job in Phase 3a: design a CUTTING PLAN for the promo video that mixes
+those assets meaningfully.
 
 You will be given:
-- project_brief.md (positioning, audience, selling points, 视觉关键词)
-- recording metadata (duration_s, width, height, fps, codec, source_path)
+- project_brief.md (positioning, audience, 独特卖点 — TONE/AUDIENCE only,
+  not a checklist)
+- demo_captions.jsonl (the Demo Driver's bilingual captions, timestamped to
+  the recording — you can choose to surface these as overlay text)
+- available_assets: every clip/page you can use as a scene background, with
+  paths and durations. Three kinds of background sources exist:
+    • `recording` — the Demo Driver's screen capture of the project
+                     (real interaction, real screens — this is your
+                     authenticity asset)
+    • `hyperframe` — OpenDesigner's motion_film output: short polished
+                     animation .mp4s designed by an HTML→MP4 designer-agent
+                     (this is your design-feel asset)
+    • `html`        — OpenDesigner's static_hero output: a designed HTML
+                     page (rasterised at render time as a still or scrolled
+                     viewport — use for hero/intro/outro visual beats)
 
-You produce a structured `cutting_plan` describing scenes, backgrounds, text
-overlays, and transitions. The host translates this plan into a Remotion TSX
-composition (M3b) and renders it (M3c).
+YOU decide how to mix them. There is no preset ratio. Use real demo
+recording where authenticity matters; use hyperframes/html where polish
+matters. A typical good mix opens on a hyperframe or html beat, drops
+into demo recording for the meat, and closes on a hyperframe — but you
+might decide differently depending on what the assets are like and what
+the project does.
 
 ═══════════════════════════════════════════════════════════════════
 HARD RULES (host-enforced; violations return ERROR and you must retry)
@@ -42,32 +60,41 @@ R3 (recording head/tail 5s skip):
   For every scene whose background.type == "recording":
     - background.start_in_source_s >= 5.0
     - background.start_in_source_s + scene.duration_s <= recording.duration_s - 5.0
-  Reason: ffmpeg recordings always have unstable head/tail frames.
+  Reason: screen captures often have unstable head/tail frames.
+  (Hyperframes / html have NO head/tail rule — OpenDesigner output is clean.)
 
-R4 (background per scene type):
+R4 (legibility — text on busy backgrounds):
   Title-style scenes (text font_size_px > 80 AND content len <= 10 chars):
-    → MUST use background.type == "recording" with darken 0.65–0.85
-    Reason: big text on plain solid color is flat; recording behind looks cinematic.
+    → MUST use background.type ∈ {recording, hyperframe} with darken 0.65–0.85
+      OR background.type == "html" (designed pages have built-in legibility)
+    Reason: big short text needs visual weight — solid color is flat.
   Body-style scenes (small text, multiple elements, lists):
-    → MUST use background.type == "color" or "gradient"
-    Reason: small text overlaid on busy recording is unreadable.
-  Pure recording display scenes (no text overlay):
-    → background.type == "recording", darken 0.
+    → MUST use background.type ∈ {color, gradient, html} (with html being a
+      designed page, not arbitrary content)
+      OR recording/hyperframe with darken ≥ 0.7.
+    Reason: small text on busy bg is unreadable.
 
 R5 (crossfade 15 frames between scenes):
-  For each pair of consecutive scenes Sn, Sn+1, you SHOULD provide a transition
-  with kind="crossfade" and duration_s == 0.5 (= 15 frames @ 30fps).
-  Cut transitions allowed but visually jarring; prefer crossfade.
+  Consecutive scenes SHOULD have transitions: kind="crossfade", duration_s=0.5
+  (= 15 frames @ 30fps). Cuts are allowed but jarring.
+
+R6 (path existence):
+  Every background.source_path must exist in available_assets exactly. The
+  host will check.
 
 Approach:
-1. Read project_brief.md to understand 视觉关键词 + 卖点.
-2. Plan 5–7 scenes spanning 30–45 seconds total.
-3. Open with title scene (recording bg + darken + big text 卖点 1).
-4. Middle scenes alternate between "showcase recording" and "small-text body".
-5. End with outro (recording bg + darken + brand statement).
-6. Call `emit_cutting_plan` with the structured plan.
+1. Read project_brief.md for tone (NOT for content selection).
+2. Inspect available_assets to see what each clip/page actually looks like
+   (you can use `read_file` on demo_captions.jsonl to see what was
+   captured during the demo).
+3. Plan 5–8 scenes spanning 30–45 seconds total.
+4. Decide mix: where to use real demo (authenticity), where to use
+   hyperframes/html (polish). Justify each choice in scene.notes if helpful.
+5. Call `emit_cutting_plan`.
 
-Be specific. Pull text DIRECTLY from 独特卖点 / 产品一句话定位. Don't invent.
+Be specific and source-truth-aligned. Pull caption text from demo_captions
+where it lines up; pull hero text from 独特卖点 only when those phrases
+match what's actually shown on screen.
 """
 
 
@@ -107,12 +134,19 @@ TOOLS = [
                                 "properties": {
                                     "type": {
                                         "type": "string",
-                                        "enum": ["color", "gradient", "recording"],
+                                        "enum": ["color", "gradient", "recording",
+                                                  "hyperframe", "html"],
                                     },
-                                    "color": {"type": "string", "description": "#RRGGBB; for color/gradient."},
-                                    "gradient_to": {"type": "string", "description": "#RRGGBB; for gradient."},
-                                    "source_path": {"type": "string", "description": "Repo-relative recording path; for recording."},
-                                    "start_in_source_s": {"type": "number", "description": "For recording; ≥ 5.0."},
+                                    "color": {"type": "string", "description": "#RRGGBB (color/gradient)."},
+                                    "gradient_to": {"type": "string", "description": "#RRGGBB (gradient)."},
+                                    "source_path": {"type": "string",
+                                                     "description": "Run-dir-relative path. recording → recordings/test.mp4; hyperframe → hyperframes/<name>.mp4; html → html_asset/index.html (or similar)."},
+                                    "start_in_source_s": {"type": "number",
+                                                            "description": "Where to seek into the source. recording: ≥ 5.0; hyperframe: ≥ 0; html: ignored."},
+                                    "html_scroll_y_pct": {"type": "number",
+                                                            "description": "html only: vertical scroll position 0..100 (% of page height). Default 0."},
+                                    "html_zoom": {"type": "number",
+                                                    "description": "html only: zoom factor (e.g. 1.2 zooms in). Default 1.0."},
                                 },
                                 "required": ["type"],
                             },
@@ -168,8 +202,16 @@ TOOLS = [
 ]
 
 
-def _validate_plan(plan: dict, recording_duration_s: float) -> str:
-    """Returns 'OK; ...' on pass, 'ERROR: ...' on fail."""
+def _validate_plan(plan: dict, available_assets: dict) -> str:
+    """Returns 'OK; ...' on pass, 'ERROR: ...' on fail.
+
+    available_assets shape:
+      {
+        "recording":  {"source_path": str, "duration_s": float, "width": int, "height": int} | None,
+        "hyperframes": [{"source_path": str, "duration_s": float, ...}, ...],
+        "html_pages":  [{"source_path": str}, ...],
+      }
+    """
     if not isinstance(plan, dict):
         return "ERROR: cutting_plan is not an object"
 
@@ -182,6 +224,15 @@ def _validate_plan(plan: dict, recording_duration_s: float) -> str:
     scenes = plan.get("scenes") or []
     if len(scenes) < 3:
         return f"ERROR: need ≥ 3 scenes, got {len(scenes)}"
+
+    rec = available_assets.get("recording")
+    rec_dur = float(rec["duration_s"]) if rec else 0.0
+    hyperframes_by_path: dict[str, dict] = {
+        h["source_path"]: h for h in (available_assets.get("hyperframes") or [])
+    }
+    html_paths: set[str] = {
+        h["source_path"] for h in (available_assets.get("html_pages") or [])
+    }
 
     # Build id index for transition validation
     ids: list[str] = []
@@ -196,11 +247,13 @@ def _validate_plan(plan: dict, recording_duration_s: float) -> str:
 
         bg = s.get("background") or {}
         bg_type = bg.get("type")
-        if bg_type not in ("color", "gradient", "recording"):
-            return f"ERROR: scenes[{i}].background.type must be color|gradient|recording"
+        if bg_type not in ("color", "gradient", "recording", "hyperframe", "html"):
+            return f"ERROR: scenes[{i}].background.type must be color|gradient|recording|hyperframe|html"
 
-        # R3: recording head/tail 5s
+        # ── recording rules
         if bg_type == "recording":
+            if not rec:
+                return f"ERROR: scenes[{i}] uses recording bg but no recording asset is available"
             start = bg.get("start_in_source_s")
             if start is None:
                 return f"ERROR: scenes[{i}] background.recording missing start_in_source_s"
@@ -208,16 +261,43 @@ def _validate_plan(plan: dict, recording_duration_s: float) -> str:
                 return (f"ERROR: scenes[{i}].background.start_in_source_s={start} "
                         f"violates R3 (must be ≥ 5.0; head 5s of recording is unstable)")
             end = start + dur
-            tail_limit = recording_duration_s - 5.0
+            tail_limit = rec_dur - 5.0
             if end > tail_limit:
                 return (f"ERROR: scenes[{i}] recording_clip ends at {end:.2f}s but "
-                        f"recording is only {recording_duration_s:.2f}s (R3: must end "
-                        f"by {tail_limit:.2f}s — last 5s of recording unusable). "
-                        f"Either shorten scene.duration_s or pick smaller start_in_source_s.")
+                        f"recording is only {rec_dur:.2f}s (R3: must end by "
+                        f"{tail_limit:.2f}s). Shorten duration or pick earlier start.")
             if not bg.get("source_path"):
                 return f"ERROR: scenes[{i}] background.recording missing source_path"
+            if bg["source_path"] != rec["source_path"]:
+                return (f"ERROR: scenes[{i}].background.source_path={bg['source_path']!r} "
+                        f"doesn't match the available recording {rec['source_path']!r}")
 
-        # R4: background per scene type
+        # ── hyperframe rules
+        if bg_type == "hyperframe":
+            sp = bg.get("source_path")
+            if not sp:
+                return f"ERROR: scenes[{i}] background.hyperframe missing source_path"
+            if sp not in hyperframes_by_path:
+                return (f"ERROR: scenes[{i}].background.source_path={sp!r} not in "
+                        f"available_assets.hyperframes ({list(hyperframes_by_path)}).")
+            start = float(bg.get("start_in_source_s") or 0)
+            if start < 0:
+                return f"ERROR: scenes[{i}] hyperframe start_in_source_s={start} must be ≥ 0"
+            hyper_dur = float(hyperframes_by_path[sp]["duration_s"])
+            if start + dur > hyper_dur + 0.05:
+                return (f"ERROR: scenes[{i}] hyperframe slice [{start:.2f},{start+dur:.2f}] "
+                        f"exceeds clip length {hyper_dur:.2f}s")
+
+        # ── html rules
+        if bg_type == "html":
+            sp = bg.get("source_path")
+            if not sp:
+                return f"ERROR: scenes[{i}] background.html missing source_path"
+            if sp not in html_paths:
+                return (f"ERROR: scenes[{i}].background.source_path={sp!r} not in "
+                        f"available_assets.html_pages ({sorted(html_paths)}).")
+
+        # ── R4: legibility
         elements = s.get("elements") or []
         text_els = [e for e in elements if e.get("type") == "text"]
         if text_els:
@@ -231,20 +311,20 @@ def _validate_plan(plan: dict, recording_duration_s: float) -> str:
                 len(e.get("content", "")) > 30 for e in text_els
             )
             if is_title_style and bg_type == "color":
-                return (f"ERROR: scenes[{i}] is title-style (big text font={biggest}px, "
-                        f"short content) but background is solid color — R4 says title "
-                        f"scenes need recording bg + darken 0.65-0.85.")
-            if is_body_style and bg_type == "recording" and (s.get("darken") or 0) < 0.6:
-                return (f"ERROR: scenes[{i}] body-style content over recording with "
-                        f"darken={s.get('darken')} — small text on busy bg is unreadable. "
-                        f"Either change to color/gradient bg, or set darken ≥ 0.7 (R4).")
+                return (f"ERROR: scenes[{i}] title-style text on solid color — R4: "
+                        f"use recording/hyperframe (darken 0.65-0.85) or html.")
+            if (is_body_style and bg_type in ("recording", "hyperframe")
+                and (s.get("darken") or 0) < 0.6):
+                return (f"ERROR: scenes[{i}] body-style text over busy bg "
+                        f"({bg_type}) with darken={s.get('darken')} — R4: "
+                        f"use color/gradient/html, or set darken ≥ 0.7.")
 
     # R5 transitions
     transitions = plan.get("transitions") or []
     for t in transitions:
         if t.get("kind") == "crossfade":
             dur = t.get("duration_s", 0)
-            if dur < 0.4:  # 12 frames @ 30fps; allow slight slop
+            if dur < 0.4:
                 return (f"ERROR: transition {t.get('from_scene')} → {t.get('to_scene')} "
                         f"crossfade duration_s={dur} too short (R5: ≥ 0.5s = 15 frames).")
 
@@ -271,22 +351,64 @@ def _tool_read_file(run_dir: Path, args: dict) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
-def _build_initial_message(project_brief: str, recording_meta: dict,
+def _build_initial_message(project_brief: str, available_assets: dict,
                            feedback: Optional[str] = None,
                            previous_plan: Optional[dict] = None) -> str:
     parts = [
-        "## Project brief",
+        "## Project brief (TONE/AUDIENCE only — not a content checklist)",
         "```markdown",
-        project_brief.strip(),
+        project_brief.strip()[:3000],
         "```",
         "",
-        "## Recording metadata",
-        f"- source_path: {recording_meta['source_path']!r} (use this exactly in background.source_path)",
-        f"- duration_s:  {recording_meta['duration_s']:.2f}",
-        f"- size:        {recording_meta['width']}x{recording_meta['height']}",
-        f"- codec:       {recording_meta['codec']}",
-        "",
+        "## Available assets — these are everything you can use as a background",
     ]
+    rec = available_assets.get("recording")
+    if rec:
+        parts.append("### `recording` (Demo Driver capture of the project actually running)")
+        parts.append(f"- source_path: {rec['source_path']!r}  (use exactly this string)")
+        parts.append(f"- duration_s:  {rec['duration_s']:.2f}")
+        parts.append(f"- size:        {rec['width']}x{rec['height']}")
+        if rec.get("codec"):
+            parts.append(f"- codec:       {rec['codec']}")
+        parts.append("- R3: must skip first 5s and last 5s.")
+        parts.append("")
+    else:
+        parts.append("### `recording` — none available (project had no demo recording).")
+        parts.append("")
+
+    hyperframes = available_assets.get("hyperframes") or []
+    if hyperframes:
+        parts.append("### `hyperframe` clips (OpenDesigner motion_film polished animations)")
+        for h in hyperframes:
+            parts.append(f"- source_path: {h['source_path']!r}  duration_s: {h['duration_s']:.2f}  size: {h.get('width', '?')}x{h.get('height', '?')}")
+            if h.get("notes"):
+                parts.append(f"    notes: {h['notes']}")
+        parts.append("- No head/tail skip rule — these are clean.")
+        parts.append("")
+    else:
+        parts.append("### `hyperframe` — none available.")
+        parts.append("")
+
+    html_pages = available_assets.get("html_pages") or []
+    if html_pages:
+        parts.append("### `html` pages (OpenDesigner static_hero designed pages)")
+        for h in html_pages:
+            parts.append(f"- source_path: {h['source_path']!r}")
+            if h.get("title"):
+                parts.append(f"    title: {h['title']!r}")
+        parts.append("- Optional html_scroll_y_pct (0..100) and html_zoom (default 1.0).")
+        parts.append("")
+    else:
+        parts.append("### `html` — none available.")
+        parts.append("")
+
+    if available_assets.get("captions_path"):
+        parts.append("## Demo captions")
+        parts.append(f"You can `read_file({available_assets['captions_path']!r})` to see "
+                     f"the bilingual captions the Demo Driver tagged during recording — "
+                     f"each entry has `t` (seconds into recording), `zh`, `en`, `importance`.")
+        parts.append("")
+
     if previous_plan:
         parts.append("## Previous cutting plan (for revision)")
         parts.append("```json")
@@ -297,17 +419,18 @@ def _build_initial_message(project_brief: str, recording_meta: dict,
         parts.append("## User feedback to incorporate")
         parts.append(feedback)
         parts.append("")
-        parts.append("Produce a revised cutting_plan.")
+        parts.append("Produce a revised cutting_plan that addresses the feedback.")
     else:
-        parts.append("Begin: design a 30-45s plan. Pull text directly from 独特卖点 of the brief. "
-                     "Call `emit_cutting_plan` with the structured plan.")
+        parts.append("Begin: 30–45s, 5–8 scenes. YOU decide the recording-vs-hyperframe-vs-html "
+                     "mix based on what each asset is good for and what this project needs to "
+                     "communicate. Call `emit_cutting_plan` when done.")
     return "\n".join(parts)
 
 
 @traced_agent("Agent 3 RemotionComposer · plan", phase=3)
 def run_cutting_planner(run_dir: Path,
                         project_brief: str,
-                        recording_meta: dict,
+                        available_assets: dict,
                         output_path: Path,
                         feedback: Optional[str] = None,
                         previous_plan: Optional[dict] = None,
@@ -319,7 +442,11 @@ def run_cutting_planner(run_dir: Path,
     model = model_for("reasoning")
     started_at = datetime.now(timezone.utc)
     started_mono = _time.monotonic()
-    log.info(f"start  recording_dur={recording_meta.get('duration_s'):.1f}s  model={model}")
+    rec_dur = (available_assets.get("recording") or {}).get("duration_s", 0)
+    n_hyper = len(available_assets.get("hyperframes") or [])
+    n_html = len(available_assets.get("html_pages") or [])
+    log.info(f"start  recording_dur={rec_dur:.1f}s  hyperframes={n_hyper}  "
+             f"html_pages={n_html}  model={model}")
 
     files_read: list[str] = []
     tool_call_count = 0
@@ -348,7 +475,7 @@ def run_cutting_planner(run_dir: Path,
     write_progress(0, "starting")
     messages = [{
         "role": "user",
-        "content": _build_initial_message(project_brief, recording_meta,
+        "content": _build_initial_message(project_brief, available_assets,
                                           feedback=feedback, previous_plan=previous_plan),
     }]
     final_plan: Optional[dict] = None
@@ -389,7 +516,7 @@ def run_cutting_planner(run_dir: Path,
                         if rel and rel not in files_read:
                             files_read.append(rel)
                 elif tu.name == "emit_cutting_plan":
-                    out = _validate_plan(tu.input, recording_meta["duration_s"])
+                    out = _validate_plan(tu.input, available_assets)
                     if out.startswith("OK"):
                         final_plan = dict(tu.input)
                 else:
