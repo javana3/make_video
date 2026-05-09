@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}{{ project }} · {{ run_id }} · {{ phase_label }}{% endblock %}
+
+{% block breadcrumb %}
+<span class="text-slate-600 mx-2">/</span>
+<span class="text-slate-300">{{ project }}</span>
+<span class="text-slate-600 mx-2">/</span>
+<span class="font-mono text-xs text-slate-500">{{ run_id }}</span>
+{% endblock %}
+
+{% block header_actions %}
+<a href="/runs/{{ project }}/{{ run_id }}/opendesign"
+   class="inline-flex items-center gap-1.5 px-3 py-1 mr-3 bg-purple-700/30 hover:bg-purple-600/40 border border-purple-600/40 text-purple-200 text-xs rounded">
+  🎨 OpenDesign
+</a>
+<div hx-get="/runs/{{ project }}/{{ run_id }}/status_chip"
+     hx-trigger="every 2s"
+     hx-swap="innerHTML">
+  {% if agent_running %}
+  <span class="inline-flex items-center gap-2 px-2 py-1 bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs rounded">
+    <span class="w-2 h-2 bg-amber-400 rounded-full animate-pulse"></span>
+    Agent running
+  </span>
+  {% else %}
+  <span class="inline-flex items-center gap-2 px-2 py-1 bg-slate-700/50 border border-slate-600 text-slate-400 text-xs rounded">
+    Idle
+  </span>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="grid grid-cols-12 gap-6">
+
+  <!-- Sidebar: Events timeline -->
+  <aside class="col-span-12 lg:col-span-3">
+    <div class="sticky top-20">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Events Timeline</h2>
+      <div class="rounded-lg border border-slate-800 bg-slate-900/50 max-h-[70vh] overflow-y-auto"
+           hx-ext="sse"
+           sse-connect="/runs/{{ project }}/{{ run_id }}/events">
+        <div sse-swap="pipeline_event"
+             hx-swap="afterbegin"
+             id="events-container">
+          <!-- Initial state: empty. SSE pushes events. -->
+        </div>
+        <div class="text-xs text-slate-600 px-3 py-2">
+          <span class="inline-block w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse mr-1"></span>
+          Live · 1s polling
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <section class="col-span-12 lg:col-span-9 space-y-5">
+
+    <!-- Phase header -->
+    <div class="flex items-center justify-between">
+      <div>
+        <h1 class="text-2xl font-bold tracking-tight">{{ phase_label }}</h1>
+        <div class="flex items-center gap-3 mt-1 text-sm">
+          <span class="text-slate-500">Gate:</span>
+          <span class="font-mono text-slate-300">{{ state.gate }}</span>
+          {% if state.gate == 'done' %}
+            <span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-300">DONE</span>
+          {% elif state.gate.startswith('waiting_') %}
+            <span class="px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-300">WAITING USER</span>
+          {% else %}
+            <span class="px-2 py-0.5 rounded text-xs bg-sky-500/20 text-sky-300">RUNNING</span>
+          {% endif %}
+        </div>
+      </div>
+      <!-- Phase progress dots -->
+      <div class="flex items-center gap-1.5">
+        {% for n in [1, 2, 3, 4, 5] %}
+        <span class="w-2.5 h-2.5 rounded-full
+          {% if n < state.phase %}bg-emerald-500{% elif n == state.phase %}bg-amber-400 animate-pulse{% else %}bg-slate-700{% endif %}"
+          title="Phase {{ n }}"></span>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- Phase-specific content -->
+    {% if state.phase == 1 %}
+      {% include "_phase_1.html" %}
+    {% elif state.phase == 2 %}
+      {% include "_phase_2.html" %}
+    {% else %}
+      <div class="rounded-lg border border-slate-800 bg-slate-900/50 px-6 py-12 text-center text-slate-400">
+        Phase {{ state.phase }} UI not implemented yet.
+      </div>
+    {% endif %}
+
+    <!-- Action result (target for HTMX swap) -->
+    <div id="action-result"></div>
+
+    <!-- Live agent log (only during agent runs) -->
+    <div>
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Live Console</h2>
+      <div class="rounded-lg border border-slate-800 bg-black/50 console-log"
+           hx-ext="sse"
+           sse-connect="/runs/{{ project }}/{{ run_id }}/agent_log">
+        <div sse-swap="agent_log"
+             hx-swap="beforeend"
+             id="agent-log-container"
+             class="px-3 py-2"></div>
+      </div>
+    </div>
+
+  </section>
+</div>
+{% endblock %}

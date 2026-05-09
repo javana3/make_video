@@ -1,0 +1,21 @@
+<!-- Phase 1 partial: ProjectAnalyzer briefs (two versions) + iterate / approve.
+     All content is lazy-loaded via polling so iterate / brief refresh "just works". -->
+
+<!-- Brief cards: standard + deep, side-by-side. Auto-refreshes every 3s. -->
+<div hx-get="/runs/{{ project }}/{{ run_id }}/briefs_panel"
+     hx-trigger="load, every 3s"
+     hx-swap="innerHTML">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/30 px-6 py-12 text-center text-slate-500 text-sm">
+    Loading briefs...
+  </div>
+</div>
+
+<!-- Iterate / approve panel. Polls every 1.5s; switches between form ↔ progress card. -->
+<div hx-get="/runs/{{ project }}/{{ run_id }}/iterate_panel"
+     hx-trigger="load, every 1500ms"
+     hx-swap="innerHTML"
+     hx-disinherit="hx-trigger">
+  <div class="rounded-lg border border-slate-800 bg-slate-900/30 px-6 py-6 text-center text-slate-500 text-sm">
+    Loading actions...
+  </div>
+</div>

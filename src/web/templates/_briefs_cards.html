@@ -1,0 +1,48 @@
+<!-- Brief version cards. Returned by GET /runs/{p}/{r}/briefs_panel -->
+
+{% if not versions %}
+<div class="rounded-lg border border-slate-800 bg-slate-900/50 px-6 py-12 text-center">
+  <p class="text-slate-400">尚无 brief。下方点 <span class="text-amber-400">↻ 重新生成（标准）</span> 或 <span class="text-purple-400">🔬 深度分析</span> 开始。</p>
+</div>
+{% else %}
+<div class="grid grid-cols-1 {% if versions|length == 2 %}xl:grid-cols-2{% endif %} gap-4">
+  {% for mode, v in versions.items() %}
+  <div class="rounded-lg border {% if mode == 'standard' %}border-amber-700/40{% else %}border-purple-700/40{% endif %} bg-slate-900/50 overflow-hidden flex flex-col">
+    <!-- Card header -->
+    <div class="flex items-center justify-between px-4 py-2.5 border-b border-slate-800 bg-slate-950/50 flex-wrap gap-2">
+      <div class="flex items-center gap-2">
+        {% if mode == 'standard' %}
+          <span class="text-amber-400 text-lg">📄</span>
+          <span class="font-semibold text-amber-300">标准版</span>
+          <span class="text-xs text-slate-500">README + 关键文档</span>
+        {% else %}
+          <span class="text-purple-400 text-lg">🔬</span>
+          <span class="font-semibold text-purple-300">深度版</span>
+          <span class="text-xs text-slate-500">含源码分析</span>
+        {% endif %}
+      </div>
+      <div class="text-xs text-slate-500 font-mono">
+        {{ v.meta.tool_calls or 0 }} 调用 · {{ v.meta.files_read|length if v.meta.files_read else 0 }} 文件
+      </div>
+    </div>
+
+    <!-- Sources -->
+    {% if v.meta.files_read %}
+    <div class="px-4 py-2 border-b border-slate-800 bg-slate-900/30 text-xs flex flex-wrap gap-1">
+      {% for f in v.meta.files_read[:8] %}
+      <code class="px-1.5 py-0.5 bg-slate-800 rounded text-emerald-300 font-mono">{{ f }}</code>
+      {% endfor %}
+      {% if v.meta.files_read|length > 8 %}
+      <span class="text-slate-500 italic">+{{ v.meta.files_read|length - 8 }} more</span>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <!-- Brief content -->
+    <article class="px-5 py-4 prose-brief text-sm flex-1 overflow-auto max-h-[60vh]">
+      {{ v.html | safe }}
+    </article>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}

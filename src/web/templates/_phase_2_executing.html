@@ -1,0 +1,140 @@
+<!-- State: plan execution in progress (or finished). Shows live install/seed/service status. -->
+
+{% set state = exec_state or {} %}
+{% set status = state.get('status', 'running') %}
+{# self-poll only while running; terminal states (ok/failed) stop polling #}
+{% set live_attrs %}
+{% if status == 'running' %}
+hx-get="/runs/{{ project }}/{{ run_id }}/phase2_panel" hx-trigger="every 2s" hx-target="#phase2-root" hx-swap="innerHTML"
+{% endif %}
+{% endset %}
+
+{% macro step_row(s) %}
+<div class="px-4 py-2 flex items-center gap-3 border-b border-slate-800 last:border-b-0">
+  {% if s.status == 'ok' %}
+    <span class="text-emerald-400">✓</span>
+  {% elif s.status == 'running' %}
+    <span class="text-amber-400 animate-pulse">●</span>
+  {% elif s.status == 'failed' %}
+    <span class="text-rose-400">✗</span>
+  {% else %}
+    <span class="text-slate-600">○</span>
+  {% endif %}
+  <code class="text-emerald-300 text-sm font-mono flex-1 truncate">$ {{ s.command }}</code>
+  <span class="text-xs text-slate-500 font-mono">{{ s.cwd }}</span>
+  {% if s.duration_s is not none %}
+  <span class="text-xs text-slate-500 font-mono">{{ "%.1f"|format(s.duration_s) }}s</span>
+  {% endif %}
+  {% if s.exit_code is not none and s.exit_code != 0 %}
+  <span class="text-xs text-rose-400 font-mono">exit {{ s.exit_code }}</span>
+  {% endif %}
+</div>
+{% if s.status == 'failed' and s.stderr_tail %}
+<div class="px-4 py-2 border-b border-slate-800 bg-rose-950/20">
+  <pre class="text-xs text-rose-300 font-mono whitespace-pre-wrap">{{ s.stderr_tail[-1500:] }}</pre>
+</div>
+{% endif %}
+{% endmacro %}
+
+<div class="space-y-4" {{ live_attrs | safe }}>
+
+  <!-- Header -->
+  <div class="rounded-lg border {% if status == 'ok' %}border-emerald-700/40 bg-emerald-950/20{% elif status == 'failed' %}border-rose-700/40 bg-rose-950/20{% else %}border-amber-500/40 bg-amber-950/20{% endif %} px-5 py-3">
+    <div class="flex items-center gap-3">
+      {% if status == 'ok' %}<span class="text-xl">✅</span><span class="font-semibold text-emerald-300">执行完成 · 服务全绿</span>
+      {% elif status == 'failed' %}<span class="text-xl">❌</span><span class="font-semibold text-rose-300">执行失败</span>
+      {% else %}<span class="text-xl">⚙️</span><span class="font-semibold text-amber-300">执行中…</span>
+      {% endif %}
+    </div>
+    {% if state.error %}
+    <p class="text-sm text-rose-300 mt-2 font-mono">{{ state.error }}</p>
+    {% endif %}
+  </div>
+
+  <!-- install steps -->
+  {% if state.install_steps %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 overflow-hidden">
+    <div class="px-4 py-2 border-b border-slate-800 bg-slate-950/50 text-sm font-semibold text-slate-300">📦 install</div>
+    {% for s in state.install_steps %}{{ step_row(s) }}{% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- seed steps -->
+  {% if state.seed_steps %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 overflow-hidden">
+    <div class="px-4 py-2 border-b border-slate-800 bg-slate-950/50 text-sm font-semibold text-slate-300">🌱 seed</div>
+    {% for s in state.seed_steps %}{{ step_row(s) }}{% endfor %}
+  </div>
+  {% endif %}
+
+  <!-- services -->
+  {% if state.service_records %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 overflow-hidden">
+    <div class="px-4 py-2 border-b border-slate-800 bg-slate-950/50 text-sm font-semibold text-slate-300">🚀 services</div>
+    <div class="divide-y divide-slate-800">
+      {% for r in state.service_records %}
+      <div class="px-4 py-2.5 flex items-center gap-3">
+        {% if r.status == 'healthy' %}
+          <span class="w-2.5 h-2.5 bg-emerald-500 rounded-full"></span>
+          <span class="text-emerald-400 text-xs font-mono">healthy</span>
+        {% elif r.status == 'starting' %}
+          <span class="w-2.5 h-2.5 bg-amber-400 rounded-full animate-pulse"></span>
+          <span class="text-amber-400 text-xs font-mono">starting</span>
+        {% elif r.status in ('dead', 'timeout') %}
+          <span class="w-2.5 h-2.5 bg-rose-500 rounded-full"></span>
+          <span class="text-rose-400 text-xs font-mono">{{ r.status }}</span>
+        {% elif r.status == 'stopped' %}
+          <span class="w-2.5 h-2.5 bg-slate-600 rounded-full"></span>
+          <span class="text-slate-500 text-xs font-mono">stopped</span>
+        {% else %}
+          <span class="w-2.5 h-2.5 bg-slate-700 rounded-full"></span>
+          <span class="text-slate-500 text-xs font-mono">{{ r.status }}</span>
+        {% endif %}
+        <span class="text-sky-300 font-semibold">{{ r.name }}</span>
+        <code class="text-slate-400 text-xs">PID {{ r.pid or '?' }}</code>
+        <code class="text-slate-400 text-xs">:{{ r.port }}</code>
+        <code class="text-slate-500 text-xs flex-1 truncate">{{ r.health_url }}</code>
+        {% if r.last_error %}
+        <span class="text-xs text-rose-400 truncate" title="{{ r.last_error }}">{{ r.last_error[:60] }}</span>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Action bar by terminal status -->
+  {% if status == 'ok' %}
+  <div class="rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-5 py-4 flex items-center justify-between flex-wrap gap-2">
+    <p class="text-sm text-emerald-300">M2a 完成 · 服务运行中。下一步是 M2b 录屏。</p>
+    <div class="flex items-center gap-2">
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/restart_services" hx-target="#action-result"
+            hx-confirm="重新跑 install / seed / 起服务（电脑重启或服务挂了的时候用）">
+        <button class="px-3 py-2 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 rounded text-sm">
+          🔄 重启服务
+        </button>
+      </form>
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/stop_services" hx-target="#action-result"
+            hx-confirm="停止所有服务？录屏阶段需要它们运行">
+        <button class="px-3 py-2 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/40 text-rose-300 rounded text-sm">
+          ⏹ 停止服务
+        </button>
+      </form>
+    </div>
+  </div>
+  {% elif status == 'failed' %}
+  <div class="rounded-lg border border-rose-700/40 bg-rose-950/20 px-5 py-4 flex items-center justify-between">
+    <p class="text-sm text-rose-300">执行失败。可让 Agent 2 修订 plan，或停服务后重启。</p>
+    <div class="flex items-center gap-2">
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/stop_services" hx-target="#action-result">
+        <button class="px-3 py-2 bg-slate-700/40 border border-slate-600 text-slate-300 rounded text-sm">⏹ 停服务</button>
+      </form>
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/draft_plan" hx-target="#action-result">
+        <input type="hidden" name="feedback" value="上次执行失败，请审查命令并修订" />
+        <button class="px-3 py-2 bg-amber-500/20 border border-amber-500/40 text-amber-300 rounded text-sm">↻ 让 Agent 修订</button>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+
+</div>

@@ -1,0 +1,51 @@
+<!-- State: agent 2 planner is running. Show progress. SELF-POLLING. -->
+
+{% set p = progress or {} %}
+{% set step = p.get('step', 0) %}
+{% set total = p.get('max_steps', 20) %}
+{% set pct = (step / total * 100) if total else 0 %}
+
+<div class="rounded-lg border border-amber-500/50 bg-amber-950/20 overflow-hidden"
+     hx-get="/runs/{{ project }}/{{ run_id }}/phase2_panel"
+     hx-trigger="every 1500ms"
+     hx-target="#phase2-root"
+     hx-swap="innerHTML">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-amber-700/40">
+    <div class="flex items-center gap-3">
+      <span class="text-xl">📋</span>
+      <span class="font-semibold text-amber-300">Agent 2 草拟启动计划中</span>
+      <span class="inline-flex items-center gap-1.5 text-xs text-slate-400">
+        <span class="w-2 h-2 bg-amber-400 rounded-full animate-pulse"></span>请耐心等待
+      </span>
+    </div>
+    <div class="text-xs font-mono text-slate-400">
+      {{ "%.1f"|format(p.get('elapsed_s', 0)) }}s
+    </div>
+  </div>
+  <div class="px-5 py-4 space-y-3">
+    <div class="space-y-1.5">
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-slate-400">step <span class="font-mono text-slate-200">{{ step }}/{{ total }}</span></span>
+        <span class="text-slate-500 font-mono">{{ "%.0f"|format(pct) }}%</span>
+      </div>
+      <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+        <div class="h-full bg-amber-500 transition-all duration-500" style="width: {{ pct }}%"></div>
+      </div>
+    </div>
+    <div class="text-sm">
+      <span class="text-slate-500">正在：</span>
+      <code class="font-mono text-emerald-300 bg-slate-900 px-2 py-0.5 rounded text-xs">{{ p.get('last_action', '...') }}</code>
+    </div>
+    {% if p.get('files_read') %}
+    <div class="flex items-center gap-3 text-xs text-slate-500 pt-1 border-t border-slate-800/50">
+      <span>📖 已读 <span class="text-slate-300 font-mono">{{ p.get('files_read', [])|length }}</span> 文件</span>
+      <span>🔧 <span class="text-slate-300 font-mono">{{ p.get('tool_calls', 0) }}</span> 次工具调用</span>
+    </div>
+    <div class="flex flex-wrap gap-1 pt-1">
+      {% for f in p.files_read[-10:] %}
+      <code class="px-1.5 py-0.5 bg-slate-900 rounded text-emerald-400/70 font-mono text-xs">{{ f }}</code>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</div>

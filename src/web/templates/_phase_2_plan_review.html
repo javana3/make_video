@@ -1,0 +1,131 @@
+<!-- State: setup_plan.json exists, awaiting user approval. -->
+
+{% set plan = plan or {} %}
+
+<div class="space-y-4">
+
+  <!-- Plan summary -->
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 px-5 py-4">
+    <div class="flex items-center gap-2 mb-2">
+      <span class="text-lg">📋</span>
+      <h2 class="font-semibold text-slate-100">启动计划</h2>
+      <span class="ml-auto text-xs text-slate-500">等待审批</span>
+    </div>
+    {% if plan.summary %}
+    <p class="text-sm text-slate-300">{{ plan.summary }}</p>
+    {% endif %}
+    {% if plan.notes %}
+    <p class="text-xs text-slate-500 mt-1 italic">{{ plan.notes }}</p>
+    {% endif %}
+  </div>
+
+  <!-- manual prereqs (if any) -->
+  {% if plan.manual_prereqs %}
+  <div class="rounded-lg border border-rose-700/40 bg-rose-950/20 px-5 py-3">
+    <h3 class="text-sm font-semibold text-rose-300 mb-1">⚠ 需要你手动完成的前置</h3>
+    <ul class="text-sm text-slate-300 list-disc ml-5">
+      {% for p in plan.manual_prereqs %}<li>{{ p }}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <!-- env vars -->
+  {% if plan.env_vars_needed %}
+  <div class="rounded-lg border border-purple-700/40 bg-purple-950/10 px-5 py-3">
+    <h3 class="text-sm font-semibold text-purple-300 mb-1">🔑 需要的环境变量</h3>
+    <div class="flex flex-wrap gap-1">
+      {% for v in plan.env_vars_needed %}
+      <code class="px-1.5 py-0.5 bg-slate-900 rounded text-purple-300 text-xs">{{ v }}</code>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- install commands -->
+  {% if plan.install_commands %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 overflow-hidden">
+    <div class="px-4 py-2 border-b border-slate-800 bg-slate-950/50 text-sm font-semibold text-slate-300">
+      📦 install ({{ plan.install_commands|length }})
+    </div>
+    <div class="divide-y divide-slate-800">
+      {% for c in plan.install_commands %}
+      <div class="px-4 py-2.5">
+        <code class="text-emerald-300 text-sm font-mono">$ {{ c.command }}</code>
+        <div class="text-xs text-slate-500 mt-1">
+          <span class="font-mono">cwd: {{ c.cwd }}</span>
+          {% if c.purpose %} · {{ c.purpose }}{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- seed commands -->
+  {% if plan.seed_commands %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 overflow-hidden">
+    <div class="px-4 py-2 border-b border-slate-800 bg-slate-950/50 text-sm font-semibold text-slate-300">
+      🌱 seed ({{ plan.seed_commands|length }})
+    </div>
+    <div class="divide-y divide-slate-800">
+      {% for c in plan.seed_commands %}
+      <div class="px-4 py-2.5">
+        <code class="text-emerald-300 text-sm font-mono">$ {{ c.command }}</code>
+        <div class="text-xs text-slate-500 mt-1">
+          <span class="font-mono">cwd: {{ c.cwd }}</span>
+          {% if c.purpose %} · {{ c.purpose }}{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- services -->
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 overflow-hidden">
+    <div class="px-4 py-2 border-b border-slate-800 bg-slate-950/50 text-sm font-semibold text-slate-300">
+      🚀 services ({{ plan.services|length }})
+    </div>
+    <div class="divide-y divide-slate-800">
+      {% for s in plan.services %}
+      <div class="px-4 py-2.5">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="text-sm font-semibold text-sky-300">{{ s.name }}</span>
+          <code class="px-1.5 py-0.5 bg-slate-900 rounded text-slate-400 text-xs">:{{ s.port }}</code>
+          <code class="px-1.5 py-0.5 bg-slate-900 rounded text-emerald-400 text-xs">{{ s.health_url }}</code>
+        </div>
+        <code class="text-emerald-300 text-sm font-mono">$ {{ s.command }}</code>
+        <div class="text-xs text-slate-500 mt-1">
+          <span class="font-mono">cwd: {{ s.cwd }}</span>
+          {% if s.purpose %} · {{ s.purpose }}{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Action bar -->
+  <div class="rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-5 py-4 flex items-center justify-between">
+    <p class="text-xs text-slate-500">通过即开始执行（host 跑 install → seed → 起 services → health check）</p>
+    <div class="flex items-center gap-2">
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/draft_plan"
+            hx-target="#action-result"
+            hx-confirm="重新生成会覆盖当前 plan，确认？">
+        <input type="hidden" name="feedback" value="" />
+        <button type="submit"
+                class="px-3 py-2 bg-slate-700/40 hover:bg-slate-700/60 border border-slate-600 text-slate-300 rounded transition text-sm">
+          ↻ 重新草拟
+        </button>
+      </form>
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/execute_plan"
+            hx-target="#action-result"
+            hx-confirm="确认执行该计划？host 会运行 install / seed / 起服务">
+        <button type="submit"
+                class="inline-flex items-center gap-2 px-5 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/50 text-emerald-300 rounded transition font-medium">
+          <span>✓</span><span>通过 → 执行</span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+</div>

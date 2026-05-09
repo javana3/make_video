@@ -1,0 +1,73 @@
+<!-- Iterate panel while Agent is running. Returned by GET /runs/{p}/{r}/iterate_panel.
+     Buttons removed entirely so they cannot be clicked. -->
+
+{% set p = progress or {} %}
+{% set step = p.get('step', 0) %}
+{% set total = p.get('max_steps', 30) %}
+{% set pct = (step / total * 100) if total else 0 %}
+{% set mode = p.get('mode', 'standard') %}
+{% set is_deep = (mode == 'deep') %}
+
+<div class="rounded-lg border {% if is_deep %}border-purple-500/50 bg-purple-950/20{% else %}border-amber-500/50 bg-amber-950/20{% endif %} overflow-hidden">
+  <div class="flex items-center justify-between px-5 py-3 border-b {% if is_deep %}border-purple-700/40{% else %}border-amber-700/40{% endif %}">
+    <div class="flex items-center gap-3">
+      {% if is_deep %}
+        <span class="text-xl">🔬</span>
+        <span class="font-semibold text-purple-300">深度分析进行中</span>
+      {% else %}
+        <span class="text-xl">↻</span>
+        <span class="font-semibold text-amber-300">标准重写进行中</span>
+      {% endif %}
+      <span class="inline-flex items-center gap-1.5 text-xs text-slate-400">
+        <span class="w-2 h-2 {% if is_deep %}bg-purple-400{% else %}bg-amber-400{% endif %} rounded-full animate-pulse"></span>
+        请耐心等待
+      </span>
+    </div>
+    <div class="text-xs font-mono text-slate-400">
+      {{ "%.1f"|format(p.get('elapsed_s', 0)) }}s
+    </div>
+  </div>
+
+  <div class="px-5 py-4 space-y-3">
+    <!-- Progress bar -->
+    <div class="space-y-1.5">
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-slate-400">step <span class="font-mono text-slate-200">{{ step }}/{{ total }}</span></span>
+        <span class="text-slate-500 font-mono">{{ "%.0f"|format(pct) }}%</span>
+      </div>
+      <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+        <div class="h-full {% if is_deep %}bg-purple-500{% else %}bg-amber-500{% endif %} transition-all duration-500 ease-out"
+             style="width: {{ pct }}%"></div>
+      </div>
+    </div>
+
+    <!-- Current action -->
+    <div class="text-sm">
+      <span class="text-slate-500">正在：</span>
+      <code class="font-mono text-emerald-300 bg-slate-900 px-2 py-0.5 rounded text-xs">{{ p.get('last_action', '...') }}</code>
+    </div>
+
+    <!-- Stats -->
+    <div class="flex items-center gap-4 text-xs text-slate-500 pt-1 border-t border-slate-800/50">
+      <span>📖 已读 <span class="text-slate-300 font-mono">{{ p.get('files_read', [])|length }}</span> 文件</span>
+      <span>🔧 <span class="text-slate-300 font-mono">{{ p.get('tool_calls', 0) }}</span> 次工具调用</span>
+      {% if p.get('files_read') %}
+      <span class="ml-auto text-slate-600 truncate" title="{{ p.files_read|join(', ') }}">
+        最近：{{ p.files_read[-1] }}
+      </span>
+      {% endif %}
+    </div>
+
+    {% if p.get('files_read') %}
+    <div class="flex flex-wrap gap-1 pt-1">
+      {% for f in p.files_read[-12:] %}
+      <code class="px-1.5 py-0.5 bg-slate-900 rounded text-emerald-400/70 font-mono text-xs">{{ f }}</code>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="px-5 py-2 border-t border-slate-800/50 bg-slate-950/40 text-xs text-slate-500 italic">
+    Agent 跑着的时候按钮已禁用。完成后此区域会自动恢复成反馈/通过表单。
+  </div>
+</div>

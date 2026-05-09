@@ -1,0 +1,68 @@
+<!-- M2b: test recording done, awaiting user accept/reject. Embeds <video>. -->
+
+{% set ts = test_state or {} %}
+{% set probe = ts.get('ffprobe', {}) or {} %}
+
+<div class="space-y-4">
+
+  <details class="rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-4 py-3">
+    <summary class="cursor-pointer text-sm font-semibold text-emerald-300">
+      ✅ M2a 服务运行中 · 点开看详情
+    </summary>
+    <div class="mt-3">{% include "_phase_2_executing.html" %}</div>
+  </details>
+
+  <!-- Recording metadata -->
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 overflow-hidden">
+    <div class="flex items-center justify-between px-5 py-3 border-b border-slate-800 bg-slate-950/50">
+      <div class="flex items-center gap-2">
+        <span class="text-xl">🎬</span>
+        <h2 class="font-semibold text-slate-100">M2b 测试录屏完成</h2>
+      </div>
+      <span class="text-xs text-slate-500">等待审窗口</span>
+    </div>
+    <div class="px-5 py-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+      <div><div class="text-slate-500">窗口</div><div class="text-slate-200 font-mono truncate" title="{{ ts.get('window_title', '?') }}">{{ ts.get('window_title', '?') }}</div></div>
+      <div><div class="text-slate-500">时长</div><div class="text-slate-200 font-mono">{{ "%.2f"|format(probe.get('duration', 0)) }}s</div></div>
+      <div><div class="text-slate-500">分辨率</div><div class="text-slate-200 font-mono">{{ probe.get('width', '?') }}x{{ probe.get('height', '?') }}</div></div>
+      <div><div class="text-slate-500">大小</div><div class="text-slate-200 font-mono">{{ "%.2f"|format(probe.get('size_bytes', 0) / 1024 / 1024) }} MB</div></div>
+      <div><div class="text-slate-500">video codec</div><div class="text-slate-200 font-mono">{{ probe.get('video_codec', '?') }}</div></div>
+      <div><div class="text-slate-500">fps</div><div class="text-slate-200 font-mono">{{ probe.get('fps', '?') }}</div></div>
+    </div>
+
+    <!-- Embedded video player. hx-preserve so 2s polling doesn't reset playback. -->
+    <div class="px-5 pb-5">
+      <video id="m2b-test-video" controls hx-preserve="true"
+             src="/runs/{{ project }}/{{ run_id }}/artifacts/recordings/test.mp4"
+             class="w-full rounded border border-slate-800 bg-black max-h-[60vh]"
+             preload="metadata">
+        Your browser does not support the video tag.
+      </video>
+    </div>
+  </div>
+
+  <!-- Decision bar -->
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 px-5 py-4 flex items-center justify-between flex-wrap gap-3">
+    <p class="text-sm text-slate-400">
+      检查录屏：捕获区域只包含项目窗口吗？画面流畅吗？
+    </p>
+    <div class="flex items-center gap-2">
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/reject_test"
+            hx-target="#action-result"
+            hx-confirm="确认丢弃这次录屏并重选窗口？">
+        <button type="submit"
+                class="px-4 py-2 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-300 rounded transition text-sm">
+          ✗ 重录（换窗口）
+        </button>
+      </form>
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_test"
+            hx-target="#action-result">
+        <button type="submit"
+                class="inline-flex items-center gap-2 px-5 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/50 text-emerald-300 rounded transition font-medium">
+          <span>✓</span><span>窗口对，进 M2c</span>
+        </button>
+      </form>
+    </div>
+  </div>
+
+</div>

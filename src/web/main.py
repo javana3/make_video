@@ -1,0 +1,1135 @@
+"""Web UI for the pipeline.
+
+FastAPI + Jinja2 + HTMX + SSE. One process serves multiple runs (read-only
+overview), with one Agent execution at a time (iterate is queued/rejected if
+busy). See WORKFLOW.md §11 for the full design.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
+from markdown_it import MarkdownIt
+
+from ..pipeline import Pipeline
+from ..tools.dotenv import load_dotenv
+from ..observability.audit import set_run_context
+
+load_dotenv()
+
+WEB_DIR = Path(__file__).resolve().parent
+TEMPLATES = Jinja2Templates(directory=str(WEB_DIR / "templates"))
+md_renderer = MarkdownIt("commonmark", {"breaks": True, "linkify": True}).enable("table")
+
+app = FastAPI(title="Promo Video Pipeline UI")
+
+WORKSPACE_ROOT = Path.cwd() / "workspace"
+
+
+# ────────────────────────────────────────────────────────────
+# Registry
+# ────────────────────────────────────────────────────────────
+
+class _Registry:
+    """Holds live Pipeline instances + agent execution state."""
+    def __init__(self) -> None:
+        self._pipelines: dict[str, Pipeline] = {}
+        self._running_agents: dict[str, str] = {}  # run_id → agent_name
+        self._lock = asyncio.Lock()
+
+    def get_or_load(self, project: str, run_id: str) -> Pipeline:
+        key = f"{project}:{run_id}"
+        if key not in self._pipelines:
+            self._pipelines[key] = Pipeline(
+                project=project, run_id=run_id,
+                workspace_root=WORKSPACE_ROOT,
+                launch_phoenix_ui=False,
+            )
+        return self._pipelines[key]
+
+    def is_running(self, run_id: str) -> bool:
+        return run_id in self._running_agents
+
+    async def mark_running(self, run_id: str, agent: str) -> None:
+        async with self._lock:
+            self._running_agents[run_id] = agent
+
+    async def mark_done(self, run_id: str) -> None:
+        async with self._lock:
+            self._running_agents.pop(run_id, None)
+
+
+REGISTRY = _Registry()
+
+
+# ────────────────────────────────────────────────────────────
+# Helpers
+# ────────────────────────────────────────────────────────────
+
+def _list_runs() -> list[dict]:
+    out: list[dict] = []
+    if not WORKSPACE_ROOT.exists():
+        return out
+    for project_dir in WORKSPACE_ROOT.iterdir():
+        if not project_dir.is_dir():
+            continue
+        runs_dir = project_dir / "runs"
+        if not runs_dir.exists():
+            continue
+        for run_dir in runs_dir.iterdir():
+            sf = run_dir / "state.json"
+            if not sf.exists():
+                continue
+            try:
+                state = json.loads(sf.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            out.append({
+                "project": project_dir.name,
+                "run_id": run_dir.name,
+                "phase": state.get("phase"),
+                "gate": state.get("gate"),
+                "manifest_count": len(state.get("manifest", {})),
+                "mtime": sf.stat().st_mtime,
+            })
+    out.sort(key=lambda r: r["mtime"], reverse=True)
+    return out
+
+
+def _read_events(run_dir: Path, since_line: int = 0) -> tuple[list[dict], int]:
+    f = run_dir / "events.jsonl"
+    if not f.exists():
+        return [], since_line
+    lines = f.read_text(encoding="utf-8").splitlines()
+    new = []
+    for ln in lines[since_line:]:
+        if ln.strip():
+            try:
+                new.append(json.loads(ln))
+            except Exception:
+                pass
+    return new, len(lines)
+
+
+def _load_brief_versions(briefs_dir: Path) -> dict:
+    """Return {standard: {md, html, meta}, deep: {...}} for whichever exists."""
+    out = {}
+    for mode in ("standard", "deep"):
+        md_path = briefs_dir / f"{mode}.md"
+        meta_path = briefs_dir / f"{mode}_meta.json"
+        if not md_path.exists():
+            continue
+        md = md_path.read_text(encoding="utf-8")
+        meta = {}
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        out[mode] = {
+            "md": md,
+            "html": md_renderer.render(md),
+            "meta": meta,
+        }
+    return out
+
+
+def _phase_label(phase: int) -> str:
+    return {
+        1: "Phase 1 · ProjectAnalyzer",
+        2: "Phase 2 · SetupRunner + HTML",
+        3: "Phase 3 · RemotionComposer",
+        4: "Phase 4 · BGMComposer",
+        5: "Phase 5 · VoiceOver",
+    }.get(phase, f"Phase {phase}")
+
+
+# ────────────────────────────────────────────────────────────
+# Routes
+# ────────────────────────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return TEMPLATES.TemplateResponse(request, "index.html", {
+        "runs": _list_runs(),
+    })
+
+
+@app.get("/runs/{project}/{run_id}", response_class=HTMLResponse)
+async def view_run(project: str, run_id: str, request: Request):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    state = pipe.state
+
+    phase_ctx: dict = {}
+    if state.phase == 1:
+        briefs_dir = pipe.run_dir / "briefs"
+        phase_ctx["versions"] = _load_brief_versions(briefs_dir)
+
+    return TEMPLATES.TemplateResponse(request, "run.html", {
+        "project": project,
+        "run_id": run_id,
+        "state": state,
+        "phase_ctx": phase_ctx,
+        "phase_label": _phase_label(state.phase),
+        "phoenix_url": "http://localhost:6006",
+        "agent_running": REGISTRY.is_running(run_id),
+    })
+
+
+@app.get("/runs/{project}/{run_id}/events")
+async def stream_events(project: str, run_id: str):
+    """SSE: stream new events.jsonl entries as they appear."""
+    run_dir = WORKSPACE_ROOT / project / "runs" / run_id
+    if not run_dir.exists():
+        raise HTTPException(404)
+
+    async def gen():
+        line_pos = 0
+        while True:
+            events, line_pos = _read_events(run_dir, line_pos)
+            for evt in events:
+                ts = evt.get("ts", "")[:19]
+                ev = evt.get("event", "")
+                agent = evt.get("agent", "-")
+                payload = evt.get("payload", {})
+                payload_str = json.dumps(payload, ensure_ascii=False)
+                # SSE-safe: escape newlines in data
+                html = (
+                    f'<div class="text-xs font-mono py-1 border-b border-slate-700 hover:bg-slate-800">'
+                    f'<span class="text-slate-500">{ts}</span> '
+                    f'<span class="text-emerald-400">{ev}</span> '
+                    f'<span class="text-sky-400">{agent}</span> '
+                    f'<span class="text-slate-400">{payload_str}</span>'
+                    f'</div>'
+                )
+                # HTMX SSE expects multi-line data: prefix
+                data_lines = "\n".join(f"data: {line}" for line in html.split("\n"))
+                yield f"event: pipeline_event\n{data_lines}\n\n"
+            # Heartbeat to keep connection alive
+            yield ": ping\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"X-Accel-Buffering": "no",
+                                      "Cache-Control": "no-cache"})
+
+
+@app.get("/runs/{project}/{run_id}/agent_log")
+async def stream_agent_log(project: str, run_id: str):
+    """SSE: tail the active agent log for live console."""
+    run_dir = WORKSPACE_ROOT / project / "runs" / run_id
+    log_dir = run_dir / "logs"
+    if not log_dir.exists():
+        raise HTTPException(404)
+
+    async def gen():
+        # Track per-file read positions
+        positions: dict[Path, int] = {}
+        while True:
+            for log_file in sorted(log_dir.glob("*.jsonl")):
+                if "pipeline" in log_file.name:
+                    continue  # skip pipeline.jsonl, we have events.jsonl for that
+                pos = positions.get(log_file, log_file.stat().st_size)
+                if not log_file.exists():
+                    continue
+                size = log_file.stat().st_size
+                if size > pos:
+                    with log_file.open("r", encoding="utf-8", errors="replace") as f:
+                        f.seek(pos)
+                        for ln in f:
+                            ln = ln.strip()
+                            if not ln:
+                                continue
+                            try:
+                                rec = json.loads(ln)
+                                ts = rec.get("record", {}).get("time", {}).get("repr", "")[11:19]
+                                msg = rec.get("text", ln)[:600]
+                                level = rec.get("record", {}).get("level", {}).get("name", "")
+                            except Exception:
+                                ts, level, msg = "", "", ln[:600]
+                            color = {
+                                "ERROR": "text-rose-400",
+                                "WARNING": "text-amber-400",
+                                "INFO": "text-slate-300",
+                                "DEBUG": "text-slate-500",
+                            }.get(level, "text-slate-300")
+                            html = (
+                                f'<div class="font-mono text-xs py-0.5 {color}">'
+                                f'<span class="text-slate-600">{ts}</span> {msg}'
+                                f'</div>'
+                            )
+                            data_lines = "\n".join(f"data: {l}" for l in html.split("\n"))
+                            yield f"event: agent_log\n{data_lines}\n\n"
+                    positions[log_file] = size
+            yield ": ping\n\n"
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"X-Accel-Buffering": "no",
+                                      "Cache-Control": "no-cache"})
+
+
+@app.post("/runs/{project}/{run_id}/iterate", response_class=HTMLResponse)
+async def iterate(project: str, run_id: str,
+                  feedback: str = Form(""),
+                  mode: str = Form("standard")):
+    if REGISTRY.is_running(run_id):
+        raise HTTPException(409, "agent already running")
+    if mode not in ("standard", "deep"):
+        mode = "standard"
+    pipe = REGISTRY.get_or_load(project, run_id)
+    asyncio.create_task(_run_agent_for_phase(pipe, feedback.strip(), mode=mode))
+    label = "深度分析" if mode == "deep" else "标准重写"
+    extra = ' 预计 60–120s（多次读源码）' if mode == "deep" else ''
+    return HTMLResponse(
+        f'<div class="px-4 py-3 bg-amber-500/20 border border-amber-500/40 text-amber-200 rounded">'
+        f'⏳ Agent {label} 中…{extra} 看下方 Live Console。'
+        f'</div>'
+    )
+
+
+@app.post("/runs/{project}/{run_id}/approve", response_class=HTMLResponse)
+async def approve(project: str, run_id: str, version: str = Form("")):
+    """For Phase 1: copy briefs/{version}.md → project_brief.md, then advance."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+
+    if pipe.state.phase == 1:
+        if version not in ("standard", "deep"):
+            raise HTTPException(400, "version must be 'standard' or 'deep'")
+        briefs_dir = pipe.run_dir / "briefs"
+        chosen_md = briefs_dir / f"{version}.md"
+        chosen_meta = briefs_dir / f"{version}_meta.json"
+        if not chosen_md.exists():
+            raise HTTPException(400, f"briefs/{version}.md does not exist; "
+                                     f"generate it first")
+        # Copy chosen → canonical
+        canonical_md = pipe.run_dir / "project_brief.md"
+        canonical_meta = pipe.run_dir / "brief_sources.json"
+        canonical_md.write_text(chosen_md.read_text(encoding="utf-8"),
+                                encoding="utf-8")
+        if chosen_meta.exists():
+            canonical_meta.write_text(chosen_meta.read_text(encoding="utf-8"),
+                                      encoding="utf-8")
+        pipe.record_asset("project_brief", canonical_md, verified=True,
+                          version=version)
+
+    pipe.gate_pass(pipe.state.gate, version=version or None)
+    if pipe.state.phase < 5:
+        next_phase = pipe.state.phase + 1
+        pipe.transition(phase=next_phase, gate="running")
+    else:
+        pipe.transition(gate="done")
+    label = {"standard": "📄 标准版", "deep": "🔬 深度版"}.get(version, "")
+    return HTMLResponse(
+        f'<div class="px-4 py-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 rounded">'
+        f'✅ Gate passed{(" · 选定" + label) if label else ""} → now phase {pipe.state.phase}, gate {pipe.state.gate}. '
+        f'<a href="/runs/{project}/{run_id}" class="underline">Reload</a> for next phase.'
+        f'</div>'
+    )
+
+
+def _phase2_state_key(run_dir: Path, run_id: str) -> str:
+    """Compute a fingerprint of phase 2 disk state. Changes when something happened."""
+    parts: list[str] = []
+    for rel in ("setup_plan.json", "setup_exec.json", "progress.json",
+                "accepted_window.json", "recordings/test_state.json",
+                "recordings/test.mp4"):
+        f = run_dir / rel
+        if f.exists():
+            try:
+                parts.append(f"{rel}:{int(f.stat().st_mtime * 1000)}:{f.stat().st_size}")
+            except Exception:
+                pass
+    parts.append(f"running:{REGISTRY.is_running(run_id)}")
+    return "|".join(parts)
+
+
+@app.get("/runs/{project}/{run_id}/phase2_state_stream")
+async def phase2_state_stream(project: str, run_id: str):
+    """SSE: emit `phase2-changed` whenever the phase-2 disk state fingerprint
+    changes. UI listens and refetches the panel only when needed — so user
+    interactions (open dropdown, type in input) are NEVER interrupted."""
+    run_dir = WORKSPACE_ROOT / project / "runs" / run_id
+
+    async def gen():
+        last_key: Optional[str] = None
+        while True:
+            key = _phase2_state_key(run_dir, run_id)
+            if key != last_key:
+                yield "event: phase2-changed\ndata: state-changed\n\n"
+                last_key = key
+            yield ": ping\n\n"
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/runs/{project}/{run_id}/phase2_panel", response_class=HTMLResponse)
+async def phase2_panel(project: str, run_id: str, request: Request):
+    """Render the right Phase 2 partial based on file state on disk."""
+    run_dir = WORKSPACE_ROOT / project / "runs" / run_id
+    plan_path = run_dir / "setup_plan.json"
+    exec_path = run_dir / "setup_exec.json"
+    progress_path = run_dir / "progress.json"
+    rec_dir = run_dir / "recordings"
+    test_recording = rec_dir / "test.mp4"
+    test_state_path = rec_dir / "test_state.json"
+    accepted_path = run_dir / "accepted_window.json"
+
+    progress = None
+    if progress_path.exists():
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        except Exception:
+            progress = None
+
+    is_running = REGISTRY.is_running(run_id)
+    progress_phase = (progress or {}).get("phase", "")
+    progress_status = (progress or {}).get("status", "")
+
+    # 1. Agent 2 planner running
+    if is_running and progress_phase == "2a-plan" and progress_status == "running":
+        return TEMPLATES.TemplateResponse(request, "_phase_2_drafting.html", {
+            "project": project, "run_id": run_id, "progress": progress,
+        })
+
+    # 2. Plan executor running / done with services up
+    exec_state = None
+    if exec_path.exists():
+        try:
+            exec_state = json.loads(exec_path.read_text(encoding="utf-8"))
+        except Exception:
+            exec_state = {"status": "failed", "error": "setup_exec.json malformed"}
+
+    # 3. Recording in progress (M2b)
+    test_state = None
+    if test_state_path.exists():
+        try:
+            test_state = json.loads(test_state_path.read_text(encoding="utf-8"))
+        except Exception:
+            test_state = None
+    if test_state and test_state.get("status") == "recording":
+        return TEMPLATES.TemplateResponse(request, "_phase_2b_recording_active.html", {
+            "project": project, "run_id": run_id,
+            "test_state": test_state,
+            "exec_state": exec_state,
+        })
+
+    # 4. Test recording exists, awaiting user approval (M2b done, accept to enter M2c)
+    if test_recording.exists() and not accepted_path.exists():
+        return TEMPLATES.TemplateResponse(request, "_phase_2b_test_done.html", {
+            "project": project, "run_id": run_id,
+            "test_state": test_state,
+            "exec_state": exec_state,
+        })
+
+    # 5. Window accepted — ready for formal recording (M2c, placeholder for now)
+    if accepted_path.exists():
+        accepted = json.loads(accepted_path.read_text(encoding="utf-8"))
+        return TEMPLATES.TemplateResponse(request, "_phase_2c_placeholder.html", {
+            "project": project, "run_id": run_id,
+            "accepted": accepted,
+            "exec_state": exec_state,
+        })
+
+    # 6. exec done OK — but check if services are actually still alive
+    # (e.g. after a reboot the PIDs in services.json are stale).
+    if exec_state and exec_state.get("status") == "ok":
+        from ..tools.service_manager import ServiceManager
+        mgr = ServiceManager(run_dir)
+        mgr.refresh_status()
+        services = mgr.list()
+        dead = [r for r in services if r.status not in ("healthy", "starting")]
+        if dead:
+            return TEMPLATES.TemplateResponse(request, "_phase_2_services_dead.html", {
+                "project": project, "run_id": run_id,
+                "services": [
+                    {"name": r.name, "status": r.status, "pid": r.pid,
+                     "port": r.port, "last_error": r.last_error}
+                    for r in services
+                ],
+            })
+
+        from ..tools.window_enum import list_windows_ranked
+        # Build hints from the setup_plan so we can score windows.
+        hints: dict = {"project_name": project, "service_urls": [], "run_id": run_id}
+        plan_path = run_dir / "setup_plan.json"
+        if plan_path.exists():
+            try:
+                plan_data = json.loads(plan_path.read_text(encoding="utf-8"))
+                hints["service_urls"] = [
+                    s.get("health_url") for s in (plan_data.get("services") or [])
+                    if s.get("health_url")
+                ]
+            except Exception:
+                pass
+        ranked = list_windows_ranked(hints)
+        windows = [
+            {"title": w.title, "pid": w.pid,
+             "score": w.score, "score_reasons": w.score_reasons}
+            for w in ranked
+        ]
+        return TEMPLATES.TemplateResponse(request, "_phase_2b_ready.html", {
+            "project": project, "run_id": run_id,
+            "windows": windows,
+            "exec_state": exec_state,
+        })
+
+    # 7. exec running / failed — show executing panel
+    if exec_state:
+        return TEMPLATES.TemplateResponse(request, "_phase_2_executing.html", {
+            "project": project, "run_id": run_id, "exec_state": exec_state,
+        })
+
+    # 8. Plan exists, awaiting approval
+    if plan_path.exists():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except Exception:
+            plan = {}
+        return TEMPLATES.TemplateResponse(request, "_phase_2_plan_review.html", {
+            "project": project, "run_id": run_id, "plan": plan,
+        })
+
+    # 9. Initial: no plan
+    return TEMPLATES.TemplateResponse(request, "_phase_2_no_plan.html", {
+        "project": project, "run_id": run_id,
+    })
+
+
+@app.get("/runs/{project}/{run_id}/windows_json")
+async def windows_json(project: str, run_id: str):
+    """Refresh window list — returns JSON for HTMX out-of-band swap or AJAX."""
+    from ..tools.window_enum import list_windows
+    return {"windows": [{"title": w.title, "pid": w.pid} for w in list_windows()]}
+
+
+@app.post("/runs/{project}/{run_id}/record_test", response_class=HTMLResponse)
+async def record_test(project: str, run_id: str,
+                      window_title: str = Form(...),
+                      duration_s: float = Form(30.0)):
+    if REGISTRY.is_running(run_id):
+        raise HTTPException(409, "another action already running")
+    if not window_title.strip():
+        raise HTTPException(400, "window_title required")
+    if duration_s < 5 or duration_s > 600:
+        raise HTTPException(400, "duration_s must be 5..600")
+
+    pipe = REGISTRY.get_or_load(project, run_id)
+    asyncio.create_task(_record_test_async(pipe, window_title.strip(), duration_s))
+    return HTMLResponse(
+        '<div class="px-4 py-3 bg-amber-500/20 border border-amber-500/40 text-amber-200 rounded">'
+        f'⏳ 测试录屏中... 抓窗口 <code class="text-emerald-300">{window_title[:60]}</code>'
+        f' 时长 {duration_s:.0f}s'
+        '</div>',
+        headers=_PHASE2_REFRESH,
+    )
+
+
+@app.post("/runs/{project}/{run_id}/accept_test", response_class=HTMLResponse)
+async def accept_test(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    rec_dir = pipe.run_dir / "recordings"
+    state_path = rec_dir / "test_state.json"
+    if not state_path.exists():
+        raise HTTPException(400, "no test recording to accept")
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    accepted = {
+        "window_title": state.get("window_title"),
+        "test_recording": state.get("output_path"),
+        "ffprobe": state.get("ffprobe"),
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    accepted_path = pipe.run_dir / "accepted_window.json"
+    accepted_path.write_text(
+        json.dumps(accepted, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    pipe.bus.emit("user_input", agent="pipeline", action="accept_test_recording",
+                  window_title=accepted["window_title"])
+    return HTMLResponse(
+        '<div class="px-4 py-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 rounded">'
+        '✅ 窗口已接受。下一步：M2c 正式录屏（待实现）'
+        '</div>',
+        headers=_PHASE2_REFRESH,
+    )
+
+
+@app.post("/runs/{project}/{run_id}/reject_test", response_class=HTMLResponse)
+async def reject_test(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    rec_dir = pipe.run_dir / "recordings"
+    for f in (rec_dir / "test.mp4", rec_dir / "test_state.json"):
+        if f.exists():
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    pipe.bus.emit("user_input", agent="pipeline", action="reject_test_recording")
+    return HTMLResponse(
+        '<div class="px-4 py-3 bg-slate-500/20 border border-slate-500/40 text-slate-200 rounded">'
+        '🗑 测试录屏已删除，可以重新选窗口录'
+        '</div>',
+        headers=_PHASE2_REFRESH,
+    )
+
+
+_PHASE2_REFRESH = {"HX-Trigger": "phase2-refresh"}
+
+
+@app.post("/runs/{project}/{run_id}/draft_plan", response_class=HTMLResponse)
+async def draft_plan(project: str, run_id: str, feedback: str = Form("")):
+    if REGISTRY.is_running(run_id):
+        raise HTTPException(409, "agent already running")
+    pipe = REGISTRY.get_or_load(project, run_id)
+    asyncio.create_task(_run_planner_async(pipe, feedback.strip()))
+    return HTMLResponse(
+        '<div class="px-4 py-3 bg-amber-500/20 border border-amber-500/40 text-amber-200 rounded">'
+        '⏳ Agent 2 草拟启动计划中…'
+        '</div>',
+        headers=_PHASE2_REFRESH,
+    )
+
+
+@app.post("/runs/{project}/{run_id}/execute_plan", response_class=HTMLResponse)
+async def execute_plan_handler(project: str, run_id: str):
+    if REGISTRY.is_running(run_id):
+        raise HTTPException(409, "another action already running")
+    pipe = REGISTRY.get_or_load(project, run_id)
+    plan_path = pipe.run_dir / "setup_plan.json"
+    if not plan_path.exists():
+        raise HTTPException(400, "no setup_plan.json — generate one first")
+    asyncio.create_task(_execute_plan_async(pipe))
+    return HTMLResponse(
+        '<div class="px-4 py-3 bg-amber-500/20 border border-amber-500/40 text-amber-200 rounded">'
+        '⏳ 执行中：装依赖 → seed → 起服务 → health check'
+        '</div>',
+        headers=_PHASE2_REFRESH,
+    )
+
+
+@app.post("/runs/{project}/{run_id}/restart_services", response_class=HTMLResponse)
+async def restart_services(project: str, run_id: str):
+    """Re-run install/seed/start of the existing plan (e.g. after reboot)."""
+    if REGISTRY.is_running(run_id):
+        raise HTTPException(409, "another action already running")
+    pipe = REGISTRY.get_or_load(project, run_id)
+    plan_path = pipe.run_dir / "setup_plan.json"
+    if not plan_path.exists():
+        raise HTTPException(400, "no setup_plan.json")
+    asyncio.create_task(_execute_plan_async(pipe))
+    return HTMLResponse(
+        '<div class="px-4 py-3 bg-amber-500/20 border border-amber-500/40 text-amber-200 rounded">'
+        '⏳ 重新执行启动计划：装依赖（缓存命中很快） → seed → 起服务 → health check'
+        '</div>',
+        headers=_PHASE2_REFRESH,
+    )
+
+
+@app.post("/runs/{project}/{run_id}/open_project_url", response_class=HTMLResponse)
+async def open_project_url(project: str, run_id: str):
+    """Open the frontend service URL in the user's default browser."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    plan_path = pipe.run_dir / "setup_plan.json"
+    if not plan_path.exists():
+        raise HTTPException(400, "no setup_plan.json")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    services = plan.get("services") or []
+    front = next((s for s in services if any(
+        h in (s.get("name", "") + " " + s.get("purpose", "")).lower()
+        for h in ("frontend", "ui", "web", "static"))), None) or (services[0] if services else None)
+    if not front:
+        raise HTTPException(400, "no service to open")
+    url = front.get("health_url") or ""
+    if url.endswith("/health"):
+        url = url[:-len("/health")] + "/"
+    import webbrowser
+    webbrowser.open(url)
+    return HTMLResponse(
+        f'<div class="px-4 py-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 rounded">'
+        f'🌐 已尝试打开 <code class="text-emerald-100">{url}</code>。'
+        f' 几秒后点 ↻ 刷新窗口列表，新窗口会被自动检测并推荐。'
+        f'</div>',
+        headers=_PHASE2_REFRESH,
+    )
+
+
+@app.post("/runs/{project}/{run_id}/stop_services", response_class=HTMLResponse)
+async def stop_services(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..tools.service_manager import ServiceManager
+    mgr = ServiceManager(pipe.run_dir)
+    mgr.stop_all()
+    pipe.bus.emit("user_input", agent="pipeline", action="stop_services")
+    return HTMLResponse(
+        '<div class="px-4 py-3 bg-slate-500/20 border border-slate-500/40 text-slate-200 rounded">'
+        '⏹ 服务已停止'
+        '</div>',
+        headers=_PHASE2_REFRESH,
+    )
+
+
+@app.get("/runs/{project}/{run_id}/briefs_panel", response_class=HTMLResponse)
+async def briefs_panel(project: str, run_id: str, request: Request):
+    """Render the two-version brief cards (standard + deep). Polled every 3s."""
+    briefs_dir = WORKSPACE_ROOT / project / "runs" / run_id / "briefs"
+    versions = _load_brief_versions(briefs_dir)
+    return TEMPLATES.TemplateResponse(request, "_briefs_cards.html", {
+        "project": project, "run_id": run_id, "versions": versions,
+    })
+
+
+@app.get("/runs/{project}/{run_id}/iterate_panel", response_class=HTMLResponse)
+async def iterate_panel(project: str, run_id: str, request: Request):
+    """Polling target: returns progress card if agent running, else iterate form."""
+    run_dir = WORKSPACE_ROOT / project / "runs" / run_id
+    is_running = REGISTRY.is_running(run_id)
+
+    progress = None
+    progress_path = run_dir / "progress.json"
+    if progress_path.exists():
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        except Exception:
+            progress = None
+
+    if is_running:
+        return TEMPLATES.TemplateResponse(request, "_iterate_running.html", {
+            "project": project, "run_id": run_id,
+            "progress": progress,
+        })
+    versions = _load_brief_versions(run_dir / "briefs")
+    return TEMPLATES.TemplateResponse(request, "_iterate_form.html", {
+        "project": project, "run_id": run_id,
+        "versions": versions,
+    })
+
+
+@app.get("/runs/{project}/{run_id}/artifacts/{rel_path:path}")
+async def get_artifact(project: str, run_id: str, rel_path: str):
+    """Serve a file from the run dir. Supports nested paths e.g. recordings/test.mp4."""
+    base = (WORKSPACE_ROOT / project / "runs" / run_id).resolve()
+    p = (base / rel_path).resolve()
+    # Path-traversal guard
+    if base != p and base not in p.parents:
+        raise HTTPException(403, "path escapes run directory")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404)
+    return FileResponse(p)
+
+
+@app.get("/runs/{project}/{run_id}/status_chip", response_class=HTMLResponse)
+async def status_chip(project: str, run_id: str):
+    """HTMX poll target — current agent running state."""
+    if REGISTRY.is_running(run_id):
+        return HTMLResponse(
+            '<span class="inline-flex items-center gap-2 px-2 py-1 bg-amber-500/20 '
+            'border border-amber-500/40 text-amber-300 text-xs rounded">'
+            '<span class="w-2 h-2 bg-amber-400 rounded-full animate-pulse"></span>'
+            'Agent running'
+            '</span>'
+        )
+    return HTMLResponse(
+        '<span class="inline-flex items-center gap-2 px-2 py-1 bg-slate-700/50 '
+        'border border-slate-600 text-slate-400 text-xs rounded">'
+        'Idle'
+        '</span>'
+    )
+
+
+# ────────────────────────────────────────────────────────────
+# OpenDesign (M2a · Agent 6) routes
+# ────────────────────────────────────────────────────────────
+
+@app.get("/runs/{project}/{run_id}/opendesign", response_class=HTMLResponse)
+async def opendesign_page(project: str, run_id: str, request: Request):
+    """Full-page OpenDesign tab: chat + iframe preview + adopt."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..agents.opendesigner import load_session
+    sess = load_session(pipe.run_dir)
+    return TEMPLATES.TemplateResponse(
+        request, "opendesign.html",
+        {
+            "project": project, "run_id": run_id,
+            "session": sess.__dict__ if sess else None,
+        },
+    )
+
+
+@app.post("/runs/{project}/{run_id}/opendesign/init", response_class=HTMLResponse)
+async def opendesign_init(project: str, run_id: str):
+    """One-time bootstrap: ensure daemon, LLM picks setup, create project."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    brief_path = pipe.run_dir / "project_brief.md"
+    if not brief_path.exists():
+        return HTMLResponse(
+            '<div class="text-rose-400 text-sm">project_brief.md 不存在 — 先完成 Phase 1。</div>',
+            status_code=400,
+        )
+    from ..agents.opendesigner import bootstrap
+    from ..tools.opendesign_lifecycle import ensure_daemon
+
+    try:
+        endpoint = await asyncio.to_thread(ensure_daemon)
+        brief = brief_path.read_text(encoding="utf-8")
+        sess = await asyncio.to_thread(
+            bootstrap, pipe.run_dir, endpoint, brief, f"{project}-promo",
+        )
+    except Exception as e:
+        return HTMLResponse(
+            f'<div class="text-rose-400 text-sm">init 失败: {type(e).__name__}: {e}</div>',
+            status_code=500,
+        )
+    return HTMLResponse(
+        '<div hx-get="/runs/{}/{}/opendesign" hx-trigger="load" hx-target="body" hx-swap="outerHTML"></div>'.format(
+            project, run_id,
+        ),
+    )
+
+
+@app.post("/runs/{project}/{run_id}/opendesign/iterate")
+async def opendesign_iterate(project: str, run_id: str,
+                              feedback: Optional[str] = Form(None),
+                              first_turn: Optional[str] = Form(None)):
+    """Stream SSE events from OpenDesign for one chat turn.
+
+    Modes:
+      - feedback="..." : user natural-language → Agent translates → OpenDesign
+      - first_turn=true: Agent uses its stored initial_prompt (no user input)
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    from ..agents.opendesigner import iterate_stream
+
+    # Capture run_context bits for thread (ContextVar doesn't inherit across threading.Thread)
+    _run_id = pipe.run_id
+    _bus = pipe.bus
+    _run_dir = pipe.run_dir
+
+    async def gen():
+        loop = asyncio.get_running_loop()
+
+        def producer(q: asyncio.Queue):
+            # threading.Thread doesn't inherit ContextVars from the parent
+            # asyncio context. Re-set run_context inside the thread so
+            # iterate_stream can find bus + emit events.
+            set_run_context(_run_id, _bus, _run_dir)
+            try:
+                if first_turn:
+                    iterator = iterate_stream(pipe.run_dir)  # uses initial_prompt
+                else:
+                    iterator = iterate_stream(pipe.run_dir, raw_user_feedback=feedback or "")
+                for evt in iterator:
+                    asyncio.run_coroutine_threadsafe(q.put(evt), loop)
+            except Exception as e:
+                asyncio.run_coroutine_threadsafe(
+                    q.put({"event": "error", "data": {"message": f"{type(e).__name__}: {e}"}}), loop,
+                )
+            finally:
+                asyncio.run_coroutine_threadsafe(q.put(None), loop)
+
+        q: asyncio.Queue = asyncio.Queue()
+        import threading
+        threading.Thread(target=producer, args=(q,), daemon=True).start()
+        while True:
+            evt = await q.get()
+            if evt is None:
+                break
+            etype = evt.get("event", "message")
+            payload = json.dumps(evt.get("data", {}), ensure_ascii=False)
+            yield f"event: {etype}\ndata: {payload}\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.get("/runs/{project}/{run_id}/opendesign/artifacts")
+async def opendesign_artifacts(project: str, run_id: str):
+    """Return JSON: {primary_kind, primary_name, files: [...]}.
+
+    Frontend uses this to decide whether to render an <iframe> (HTML preview)
+    or a <video> tag (HyperFrames .mp4 preview).
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..agents.opendesigner import list_artifacts
+    data = await asyncio.to_thread(list_artifacts, pipe.run_dir)
+    return data
+
+
+@app.get("/runs/{project}/{run_id}/opendesign/preview")
+async def opendesign_preview(project: str, run_id: str, file: Optional[str] = None):
+    """Stream a project artifact from the OpenDesign daemon.
+
+    Without ?file= : returns the primary artifact (smart-pick HTML or MP4).
+    With ?file=name.mp4 : streams that specific file with proper Content-Type.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..agents.opendesigner import list_artifacts, load_session
+    from ..tools.opendesign_client import read_artifact_bytes
+
+    sess = load_session(pipe.run_dir)
+    if sess is None:
+        return HTMLResponse(
+            '<!doctype html><html><body style="font-family:monospace;padding:2em;color:#888;background:#111;">'
+            '<p>no OpenDesign session yet</p></body></html>',
+            status_code=200,
+        )
+
+    if file is None:
+        info = await asyncio.to_thread(list_artifacts, pipe.run_dir)
+        file = info.get("primary_name")
+        if file is None:
+            return HTMLResponse(
+                '<!doctype html><html><body style="font-family:monospace;padding:2em;color:#888;background:#111;">'
+                '<p>no artifact yet — waiting for OpenCode to produce output...</p></body></html>',
+                status_code=200,
+            )
+
+    try:
+        raw = await asyncio.to_thread(
+            read_artifact_bytes, sess.daemon_url, sess.project_id, file,
+        )
+    except Exception as e:
+        return HTMLResponse(
+            f'<!doctype html><html><body style="font-family:monospace;padding:2em;color:#888;background:#111;">'
+            f'<p>preview unavailable: {type(e).__name__}: {e}</p></body></html>',
+            status_code=200,
+        )
+
+    name_lower = file.lower()
+    from fastapi.responses import Response
+    if name_lower.endswith(".mp4"):
+        return Response(content=raw, media_type="video/mp4")
+    if name_lower.endswith(".webm"):
+        return Response(content=raw, media_type="video/webm")
+    if name_lower.endswith(".png"):
+        return Response(content=raw, media_type="image/png")
+    if name_lower.endswith((".jpg", ".jpeg")):
+        return Response(content=raw, media_type="image/jpeg")
+    # Default: HTML
+    return HTMLResponse(content=raw)
+
+
+@app.post("/runs/{project}/{run_id}/opendesign/adopt", response_class=HTMLResponse)
+async def opendesign_adopt(project: str, run_id: str, as_role: str = Form("auto")):
+    """Adopt OpenDesign artifact with routing.
+
+    as_role:
+      - "auto"  : session.mode decides (motion_film→final, static_hero→hero)
+      - "hero"  : route to run_dir/hero/intro.mp4 (or html_asset/) for Phase 3
+      - "final" : route to run_dir/outputs/final.mp4 (skip Phase 3-5, advance to done)
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    from ..agents.opendesigner import adopt
+
+    try:
+        result = await asyncio.to_thread(adopt, pipe.run_dir, as_role)
+    except Exception as e:
+        return HTMLResponse(
+            f'<div class="text-rose-400 text-sm">adopt 失败: {type(e).__name__}: {e}</div>',
+            status_code=500,
+        )
+
+    actual_role = result.get("as_role", as_role)
+    primary = result.get("primary_target", "")
+    primary_kind = result.get("primary_kind", "?")
+    sz = result.get("primary_bytes") or 0
+    sz_str = f"{sz/1024/1024:.2f} MB" if sz else f"{result.get('primary_files', '?')} files"
+
+    # If user picked "final" + got a video → skip Phase 3-5, advance state to done
+    advance_msg = ""
+    if actual_role == "final" and primary_kind == "video":
+        try:
+            pipe.transition(phase=5, gate="done")
+            pipe.bus.emit("gate_pass", agent="pipeline", gate="adopt_final_skip_phase_3_5")
+            advance_msg = " · 已直跳 phase=5 gate=done"
+        except Exception as e:
+            advance_msg = f" · ⚠ phase advance 失败: {e}"
+
+    return HTMLResponse(
+        f'<div class="text-emerald-400 text-sm">'
+        f'✅ 已采纳为 <b>{actual_role}</b> ({primary_kind}) → <code>{primary}</code> · {sz_str}'
+        f'{advance_msg}'
+        f'</div>',
+    )
+
+
+# ────────────────────────────────────────────────────────────
+# Background agent execution
+# ────────────────────────────────────────────────────────────
+
+async def _run_planner_async(pipe: Pipeline, feedback: str) -> None:
+    """Phase 2a: invoke Agent 2 planner."""
+    await REGISTRY.mark_running(pipe.run_id, "phase2-plan")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..agents.setup_runner import run_planner
+        # delete any stale exec state since we're (re)drafting
+        exec_path = pipe.run_dir / "setup_exec.json"
+        if exec_path.exists():
+            exec_path.unlink()
+        plan_path = pipe.run_dir / "setup_plan.json"
+        progress_path = pipe.run_dir / "progress.json"
+        # load brief for context
+        canonical_brief = pipe.run_dir / "project_brief.md"
+        brief_text = canonical_brief.read_text(encoding="utf-8") if canonical_brief.exists() else None
+        repo_dir = pipe.run_dir / "repo"
+        await asyncio.to_thread(
+            run_planner,
+            repo_dir=repo_dir,
+            output_path=plan_path,
+            project_brief=brief_text,
+            feedback=feedback or None,
+            progress_path=progress_path,
+        )
+        pipe.record_asset("setup_plan", plan_path, verified=True)
+    except Exception as e:
+        pipe.log.exception(f"planner failed: {e}")
+        pipe.bus.emit("asset_failed", agent="Agent 2 SetupRunner",
+                      error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+async def _record_test_async(pipe: Pipeline, window_title: str, duration_s: float) -> None:
+    """Phase 2b: spawn ffmpeg gdigrab to capture the chosen window for ~30s."""
+    await REGISTRY.mark_running(pipe.run_id, "phase2b-record-test")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..tools.recorder import record_window
+        from ..tools.window_enum import bring_to_foreground
+
+        # Force target window visible before ffmpeg starts capturing.
+        # gdigrab captures real screen pixels — a hidden window means black frames.
+        brought = await asyncio.to_thread(bring_to_foreground, window_title)
+        pipe.log.info(f"bring_to_foreground({window_title!r}) → {brought}")
+        await asyncio.sleep(0.7)  # let the window paint after foregrounding
+
+        rec_dir = pipe.run_dir / "recordings"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        out_path = rec_dir / "test.mp4"
+        state_path = rec_dir / "test_state.json"
+        result = await asyncio.to_thread(
+            record_window,
+            window_title=window_title,
+            duration_s=duration_s,
+            output_path=out_path,
+            state_path=state_path,
+        )
+        if result.status == "done":
+            pipe.record_asset("recording_test", out_path, verified=True,
+                              window_title=window_title,
+                              duration_s=duration_s)
+        else:
+            pipe.bus.emit("asset_failed", agent="pipeline",
+                          name="recording_test", error=result.error)
+    except Exception as e:
+        pipe.log.exception(f"record_test failed: {e}")
+        pipe.bus.emit("asset_failed", agent="pipeline",
+                      error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+async def _execute_plan_async(pipe: Pipeline) -> None:
+    """Phase 2a: host-side plan executor (no LLM)."""
+    await REGISTRY.mark_running(pipe.run_id, "phase2-execute")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..tools.plan_executor import execute_plan
+        plan = json.loads((pipe.run_dir / "setup_plan.json").read_text(encoding="utf-8"))
+        repo_dir = pipe.run_dir / "repo"
+        state_path = pipe.run_dir / "setup_exec.json"
+        result = await asyncio.to_thread(
+            execute_plan,
+            plan=plan, repo_dir=repo_dir,
+            state_path=state_path,
+            services_dir=pipe.run_dir,
+        )
+        if result.status == "ok":
+            pipe.bus.emit("asset_verified", agent="pipeline",
+                          name="services_healthy",
+                          path=str(pipe.run_dir / "services.json"))
+        else:
+            pipe.bus.emit("asset_failed", agent="pipeline",
+                          name="setup_exec", error=result.error)
+    except Exception as e:
+        pipe.log.exception(f"plan execution failed: {e}")
+        pipe.bus.emit("asset_failed", agent="pipeline",
+                      error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+async def _run_agent_for_phase(pipe: Pipeline, feedback: str,
+                               mode: str = "standard") -> None:
+    """Dispatch by current phase; each phase has its own Agent."""
+    await REGISTRY.mark_running(pipe.run_id, f"phase{pipe.state.phase}")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+
+        if pipe.state.phase == 1:
+            from ..agents.project_analyzer import run_project_analyzer
+            repo_dir = pipe.run_dir / "repo"
+            briefs_dir = pipe.run_dir / "briefs"
+            briefs_dir.mkdir(exist_ok=True)
+            brief_path = briefs_dir / f"{mode}.md"
+            progress_path = pipe.run_dir / "progress.json"
+            previous = brief_path.read_text(encoding="utf-8") if brief_path.exists() else None
+            repo_url = pipe.state.manifest.get("repo", {}).get("url", "")
+            await asyncio.to_thread(
+                run_project_analyzer,
+                repo_dir=repo_dir, repo_url=repo_url,
+                output_path=brief_path,
+                feedback=feedback or None,
+                previous_brief=previous,
+                mode=mode,  # type: ignore[arg-type]
+                progress_path=progress_path,
+            )
+            pipe.record_asset(f"brief_{mode}", brief_path, verified=True, mode=mode)
+        else:
+            pipe.log.warning(f"phase {pipe.state.phase} has no Agent yet; iterate is a no-op")
+    except Exception as e:
+        pipe.log.exception(f"agent failed: {e}")
+        pipe.bus.emit("asset_failed", agent=f"phase{pipe.state.phase}",
+                      error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+# ────────────────────────────────────────────────────────────
+# Entry
+# ────────────────────────────────────────────────────────────
+
+def run_server(host: str = "127.0.0.1", port: int = 7860, reload: bool = False) -> None:
+    # Launch Phoenix once for the server lifetime so all web-triggered Agent
+    # runs are traced. Pipeline instances created via Registry use launch_ui=False,
+    # which is now a no-op (already initialized) but Anthropic SDK auto-instrument
+    # was activated here, so their LLM calls still emit spans into Phoenix.
+    if not reload:
+        from ..observability.tracer import phoenix_url
+        from ..observability.tracer import setup as setup_tracing
+        setup_tracing(project_name="video-workflow-web", launch_ui=True)
+        print(f"Phoenix UI: {phoenix_url()}")
+    else:
+        print("⚠ --reload mode skips Phoenix launch (worker isolation). "
+              "Restart without --reload to enable tracing.")
+
+    import uvicorn
+    uvicorn.run("src.web.main:app" if reload else app,
+                host=host, port=port, reload=reload, log_level="info")
+
+
+if __name__ == "__main__":
+    run_server()

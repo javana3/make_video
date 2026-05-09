@@ -1,0 +1,338 @@
+{% extends "base.html" %}
+{% block title %}OpenDesign · {{ project }}/{{ run_id }}{% endblock %}
+
+{% block breadcrumb %}
+<span class="text-slate-600 mx-2">/</span>
+<a class="text-slate-300 hover:underline" href="/runs/{{ project }}/{{ run_id }}">{{ project }}/{{ run_id }}</a>
+<span class="text-slate-600 mx-2">/</span>
+<span class="text-purple-300">OpenDesign</span>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-4">
+
+  <div class="flex items-baseline justify-between">
+    <h1 class="text-2xl font-bold tracking-tight text-purple-200">M2a · OpenDesign</h1>
+    <a class="text-xs text-slate-500 hover:text-slate-300"
+       href="/runs/{{ project }}/{{ run_id }}">← 回 run 主面板</a>
+  </div>
+
+{% if not session %}
+
+  <!-- BOOTSTRAP STATE -->
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 p-6 space-y-4">
+    <p class="text-slate-300 text-sm">
+      尚未初始化 OpenDesign session。Agent 6 会：
+    </p>
+    <ol class="list-decimal list-inside text-sm text-slate-400 space-y-1 pl-2">
+      <li>启动 OpenDesign daemon（如未运行）</li>
+      <li>读 <code class="text-slate-200">project_brief.md</code></li>
+      <li>LLM 选 skill / design system / 写第一版 prompt</li>
+      <li>创建 OpenDesign 项目（不立即发 prompt — 你审完点 Send）</li>
+    </ol>
+    <div class="pt-2">
+      <button class="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded font-semibold"
+              hx-post="/runs/{{ project }}/{{ run_id }}/opendesign/init"
+              hx-target="#init-result"
+              hx-swap="innerHTML"
+              hx-disabled-elt="this"
+              hx-indicator="#init-spinner">
+        初始化 OpenDesign session
+      </button>
+      <span id="init-spinner" class="htmx-indicator text-amber-400 text-xs ml-3">
+        ⏳ 调 LLM + 启 daemon 中（首次 30-90s）...
+      </span>
+    </div>
+    <div id="init-result"></div>
+  </div>
+
+{% else %}
+
+  <!-- ACTIVE SESSION -->
+  <div class="grid grid-cols-12 gap-4">
+
+    <!-- Left: chat + state -->
+    <div class="col-span-12 lg:col-span-5 space-y-4">
+
+      <!-- Session info -->
+      <div class="rounded-lg border border-purple-900/40 bg-purple-950/20 p-4 space-y-1 text-xs">
+        <div><span class="text-slate-500">Project:</span> <code class="text-purple-300">{{ session.project_id }}</code></div>
+        <div><span class="text-slate-500">Skill:</span> <code class="text-purple-300">{{ session.skill_id }}</code></div>
+        <div><span class="text-slate-500">Design System:</span> <code class="text-purple-300">{{ session.design_system_id }}</code></div>
+        <div><span class="text-slate-500">Coding agent:</span> <code class="text-purple-300">{{ session.agent_id }}</code></div>
+        <div><span class="text-slate-500">OpenDesign Web:</span>
+          <a class="text-sky-300 hover:underline" target="_blank" href="{{ session.web_url }}projects/{{ session.project_id }}">{{ session.web_url }}projects/{{ session.project_id }}</a>
+        </div>
+        {% if session.adopted_path %}
+        <div class="pt-2 text-emerald-400">
+          ✅ 已采纳 → <code>{{ session.adopted_path }}</code>
+        </div>
+        {% endif %}
+      </div>
+
+      {% if not session.history %}
+      <!-- First-turn banner: Agent's initial_prompt waiting to fire -->
+      <div class="rounded-lg border border-amber-700/50 bg-amber-950/30 p-4 space-y-3">
+        <div class="text-sm font-semibold text-amber-300">
+          🤖 Agent 已就绪，准备发首轮 prompt
+        </div>
+        <div class="text-xs text-slate-400">Agent 从 brief 推出的首版 prompt：</div>
+        <pre class="text-xs text-slate-200 bg-slate-900 rounded p-2 whitespace-pre-wrap font-mono">{{ session.initial_prompt }}</pre>
+        <div class="text-xs text-slate-500 italic">
+          点下方 "🚀 让 Agent 开 跑" 把这个 prompt 发给 OpenDesign（耗时 10-15 min）。<br>
+          后续轮你只需说自然语言反馈（"字小一点", "金黑配色"），Agent 会翻译。
+        </div>
+        <button id="kick-first-turn"
+                class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-sm rounded font-semibold">
+          🚀 让 Agent 开跑
+        </button>
+      </div>
+      {% endif %}
+
+      <!-- Chat history -->
+      <div>
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Chat history</h2>
+        <div class="rounded-lg border border-slate-800 bg-slate-900/50 max-h-96 overflow-y-auto p-3 space-y-3">
+          {% if not session.history %}
+            <p class="text-slate-500 text-xs italic">还没有对话。Send 第一条消息开始。</p>
+          {% else %}
+            {% for turn in session.history %}
+            <div class="border-l-2 border-purple-700 pl-3 py-1">
+              <div class="text-xs text-slate-500">
+                #{{ turn.turn_index }} · {{ turn.elapsed_s }}s · {{ turn.n_events }} events ·
+                <span class="text-emerald-400">{{ turn.final_status or "?" }}</span>
+              </div>
+              <div class="text-sm text-slate-200 mt-1">{{ turn.user_message }}</div>
+            </div>
+            {% endfor %}
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- Feedback form (Agent translates) -->
+      <form id="iterate-form" class="space-y-2" onsubmit="return sendFeedback(event)">
+        <label class="text-xs text-slate-500">你的反馈（自然语言，Agent 会翻译成精确 prompt）:</label>
+        <textarea id="iterate-msg" rows="3" required
+                  placeholder="如：'字太大了'，'背景换金黑配色'，'标题改 4 个字 摔倒就赢'..."
+                  class="w-full bg-slate-900 border border-slate-700 rounded px-3 py-2 text-sm focus:border-purple-500 focus:outline-none"></textarea>
+        <div class="flex justify-between items-center">
+          <button type="submit" id="send-btn"
+                  class="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm rounded font-semibold disabled:opacity-50">
+            Send 反馈 → Agent → OpenDesign
+          </button>
+          <div class="flex gap-2">
+            <button type="button"
+                    class="px-3 py-2 bg-sky-700 hover:bg-sky-600 text-white text-xs rounded"
+                    hx-post="/runs/{{ project }}/{{ run_id }}/opendesign/adopt"
+                    hx-vals='{"as_role": "hero"}'
+                    hx-target="#adopt-result"
+                    hx-confirm="作为 Hero 嵌入：mp4 落到 hero/intro.mp4，仍走 Phase 3 Remotion 拼接。继续？">
+              📌 采纳为 Hero
+            </button>
+            <button type="button"
+                    class="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded"
+                    hx-post="/runs/{{ project }}/{{ run_id }}/opendesign/adopt"
+                    hx-vals='{"as_role": "final"}'
+                    hx-target="#adopt-result"
+                    hx-confirm="作为 Final：mp4 直接 → outputs/final.mp4，跳过 Phase 3/4/5。继续？">
+              🎬 采纳为 Final
+            </button>
+          </div>
+        </div>
+      </form>
+
+      <div id="adopt-result"></div>
+
+      <!-- SSE event stream display -->
+      <div>
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">SSE events</h2>
+        <pre id="sse-events" class="rounded-lg border border-slate-800 bg-black text-xs text-slate-400 p-3 max-h-64 overflow-y-auto whitespace-pre-wrap font-mono"></pre>
+      </div>
+
+    </div>
+
+    <!-- Right: smart preview (iframe for HTML / video tag for MP4) -->
+    <div class="col-span-12 lg:col-span-7">
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-500">
+          Live preview · <span id="preview-mode-label" class="text-purple-300">checking...</span>
+        </h2>
+        <button class="text-xs text-purple-300 hover:underline" onclick="refreshPreview()">↻ 刷新</button>
+      </div>
+
+      <!-- Container — JS swaps in iframe or video depending on artifact kind -->
+      <div id="preview-container"
+           class="w-full h-[80vh] rounded-lg border border-slate-800 bg-slate-900/50 flex items-center justify-center text-slate-500 text-sm">
+        loading...
+      </div>
+
+      <!-- File list (collapsed) -->
+      <details class="mt-2">
+        <summary class="cursor-pointer text-xs text-slate-500 hover:text-slate-300">📂 project files</summary>
+        <ul id="preview-file-list" class="mt-2 text-xs text-slate-400 font-mono space-y-1 pl-4"></ul>
+      </details>
+    </div>
+
+  </div>
+
+  <script>
+    function logEvent(name, data) {
+      const pre = document.getElementById('sse-events');
+      if (!pre) return;
+      const t = new Date().toLocaleTimeString();
+      let summary = '';
+      try {
+        const obj = typeof data === 'string' ? JSON.parse(data) : data;
+        if (obj && obj.type) summary = obj.type + ' ';
+        if (obj && obj.delta) summary += String(obj.delta).slice(0, 80);
+        else if (obj && obj.label) summary += obj.label;
+        else if (obj && obj.name) summary += obj.name;
+      } catch { summary = String(data).slice(0, 200); }
+      pre.textContent += `[${t}] ${name.padEnd(8)} ${summary}\n`;
+      pre.scrollTop = pre.scrollHeight;
+    }
+
+    async function streamIterate(fd, btnLabel) {
+      const btn = document.getElementById('send-btn') || document.getElementById('kick-first-turn');
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = btnLabel || '⏳ 处理中...';
+      }
+      try {
+        const resp = await fetch(
+          `/runs/{{ project }}/{{ run_id }}/opendesign/iterate`,
+          { method: 'POST', body: fd },
+        );
+        if (!resp.ok || !resp.body) {
+          logEvent('error', `HTTP ${resp.status}`);
+          return false;
+        }
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        let curEvent = 'message';
+        let curData = [];
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          while (true) {
+            const nlIdx = buf.indexOf('\n');
+            if (nlIdx < 0) break;
+            const line = buf.slice(0, nlIdx).replace(/\r$/, '');
+            buf = buf.slice(nlIdx + 1);
+            if (line === '') {
+              if (curData.length) {
+                const data = curData.join('\n');
+                logEvent(curEvent, data);
+                if (curEvent === 'end' || curEvent === 'error') {
+                  // refresh preview to pick up new artifact, then reload page (history updated)
+                  if (typeof refreshPreview === 'function') refreshPreview();
+                  setTimeout(() => window.location.reload(), 2000);
+                }
+              }
+              curEvent = 'message';
+              curData = [];
+            } else if (line.startsWith('event:')) {
+              curEvent = line.slice(6).trim();
+            } else if (line.startsWith('data:')) {
+              curData.push(line.slice(5).replace(/^ /, ''));
+            }
+          }
+        }
+      } catch (e) {
+        logEvent('error', String(e));
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = btnLabel ? btnLabel.replace('⏳ ', '').replace('处理中...', '') : 'Send 反馈 → Agent → OpenDesign';
+        }
+      }
+      return false;
+    }
+
+    async function sendFeedback(ev) {
+      ev.preventDefault();
+      const msg = document.getElementById('iterate-msg').value.trim();
+      if (!msg) return false;
+      logEvent('start', `user feedback → ${msg.slice(0, 80)}`);
+      const fd = new FormData();
+      fd.append('feedback', msg);
+      await streamIterate(fd, '⏳ Agent 翻译 + OpenDesign 处理中...');
+      // restore textarea reset on success path
+      document.getElementById('iterate-msg').value = '';
+      return false;
+    }
+
+    async function kickFirstTurn() {
+      logEvent('start', 'Agent → OpenDesign (first turn / initial_prompt)');
+      const fd = new FormData();
+      fd.append('first_turn', '1');
+      await streamIterate(fd, '⏳ OpenDesign 处理首轮 (10-15 min)...');
+    }
+
+    // Auto-wire first-turn button if present
+    const kickBtn = document.getElementById('kick-first-turn');
+    if (kickBtn) {
+      kickBtn.addEventListener('click', kickFirstTurn);
+    }
+
+    // ── Smart preview swap (iframe for HTML, video for MP4) ──────────────
+    async function refreshPreview() {
+      const container = document.getElementById('preview-container');
+      const label = document.getElementById('preview-mode-label');
+      const fileList = document.getElementById('preview-file-list');
+      try {
+        const resp = await fetch(`/runs/{{ project }}/{{ run_id }}/opendesign/artifacts`);
+        const info = await resp.json();
+        if (fileList) {
+          fileList.innerHTML = '';
+          for (const f of (info.files || [])) {
+            const li = document.createElement('li');
+            const sz = (f.size || 0) / 1024;
+            li.textContent = `${f.name}  (${sz < 1024 ? sz.toFixed(1) + ' KB' : (sz/1024).toFixed(2) + ' MB'})`;
+            fileList.appendChild(li);
+          }
+        }
+        const kind = info.primary_kind;
+        const name = info.primary_name;
+        const t = Date.now();
+        if (kind === 'video' && name) {
+          label.textContent = `🎞️ ${name}`;
+          container.innerHTML = '';
+          container.className = 'w-full rounded-lg border border-slate-800 bg-black';
+          const video = document.createElement('video');
+          video.src = `/runs/{{ project }}/{{ run_id }}/opendesign/preview?file=${encodeURIComponent(name)}&t=${t}`;
+          video.controls = true;
+          video.autoplay = false;
+          video.className = 'w-full rounded-lg';
+          video.style.maxHeight = '80vh';
+          container.appendChild(video);
+        } else if (kind === 'html' && name) {
+          label.textContent = `📄 ${name}`;
+          container.innerHTML = '';
+          container.className = 'w-full h-[80vh] rounded-lg border border-slate-800 bg-white';
+          const iframe = document.createElement('iframe');
+          iframe.src = `/runs/{{ project }}/{{ run_id }}/opendesign/preview?file=${encodeURIComponent(name)}&t=${t}`;
+          iframe.className = 'w-full h-full rounded-lg border-0';
+          iframe.setAttribute('sandbox', 'allow-scripts');
+          container.appendChild(iframe);
+        } else {
+          label.textContent = '⏳ waiting for first artifact';
+          container.className = 'w-full h-[80vh] rounded-lg border border-slate-800 bg-slate-900/50 flex items-center justify-center text-slate-500 text-sm';
+          container.innerHTML = 'OpenCode 还没产出文件 — 发首轮 prompt 后约 5-15 min';
+        }
+      } catch (e) {
+        label.textContent = '✗ error';
+        container.innerHTML = `<div class="p-4 text-rose-400 text-sm">refresh failed: ${e}</div>`;
+      }
+    }
+
+    // Initial render + refresh after each turn ends
+    refreshPreview();
+  </script>
+
+{% endif %}
+
+</div>
+{% endblock %}

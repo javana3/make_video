@@ -1,0 +1,49 @@
+<!-- M2b: ffmpeg currently capturing the window. Live progress card. -->
+
+{% set ts = test_state or {} %}
+{% set elapsed = ts.get('elapsed_s', 0) %}
+{% set duration = ts.get('duration_s', 30) %}
+{% set pct = (elapsed / duration * 100) if duration else 0 %}
+{% set size_mb = (ts.get('file_size_bytes', 0) / 1024 / 1024) %}
+
+<div class="rounded-lg border border-amber-500/50 bg-amber-950/20 overflow-hidden"
+     hx-get="/runs/{{ project }}/{{ run_id }}/phase2_panel"
+     hx-trigger="every 1s"
+     hx-target="#phase2-root"
+     hx-swap="innerHTML">
+  <div class="flex items-center justify-between px-5 py-3 border-b border-amber-700/40">
+    <div class="flex items-center gap-3">
+      <span class="text-xl">📹</span>
+      <span class="font-semibold text-amber-300">测试录屏进行中</span>
+      <span class="inline-flex items-center gap-1.5 text-xs text-slate-400">
+        <span class="w-2 h-2 bg-rose-500 rounded-full animate-pulse"></span>REC
+      </span>
+    </div>
+    <div class="text-xs font-mono text-slate-400">
+      {{ "%.1f"|format(elapsed) }}s / {{ "%.0f"|format(duration) }}s
+    </div>
+  </div>
+  <div class="px-5 py-4 space-y-3">
+    <div class="space-y-1.5">
+      <div class="flex items-center justify-between text-xs">
+        <span class="text-slate-400">elapsed <span class="font-mono text-slate-200">{{ "%.1f"|format(elapsed) }}s</span></span>
+        <span class="text-slate-500 font-mono">{{ "%.0f"|format(pct) }}%</span>
+      </div>
+      <div class="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+        <div class="h-full bg-amber-500 transition-all duration-500" style="width: {{ pct }}%"></div>
+      </div>
+    </div>
+    <div class="text-sm">
+      <span class="text-slate-500">窗口：</span>
+      <code class="font-mono text-emerald-300 bg-slate-900 px-2 py-0.5 rounded text-xs">{{ ts.get('window_title', '?') }}</code>
+    </div>
+    <div class="text-sm">
+      <span class="text-slate-500">文件大小：</span>
+      <span class="font-mono text-slate-300">{{ "%.2f"|format(size_mb) }} MB</span>
+      <span class="text-slate-600 ml-2">({{ ts.get('file_size_bytes', 0) }} B)</span>
+    </div>
+  </div>
+  <div class="px-5 py-2 border-t border-slate-800/50 bg-slate-950/40 text-xs text-slate-500 italic">
+    ⚠ 录屏期间不要最小化目标窗口；ffmpeg gdigrab 抓不到隐藏窗口。
+  </div>
+</div>

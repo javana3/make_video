@@ -1,0 +1,34 @@
+.env
+.env.local
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Workspace runtime data
+workspace/
+
+# IDE / agent harness state
+.vscode/
+.idea/
+.claude/
+
+# Phoenix
+.phoenix/
+
+# Node (in case Remotion projects spill module dirs into root)
+node_modules/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
+
+# CLAUDE.md is private dev notes (not part of public README)
+CLAUDE.md

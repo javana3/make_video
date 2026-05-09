@@ -1,0 +1,86 @@
+<!-- Iterate + approve form (idle state).
+     Returned by GET /runs/{p}/{r}/iterate_panel when no agent is running. -->
+
+{% set versions = versions or {} %}
+{% set has_standard = 'standard' in versions %}
+{% set has_deep = 'deep' in versions %}
+
+<div class="space-y-4">
+
+  <!-- Feedback + iterate buttons -->
+  <div class="rounded-lg border border-slate-800 bg-slate-900/50 px-5 py-5 space-y-3">
+    <div class="flex items-center justify-between">
+      <h2 class="text-sm font-semibold text-slate-300">反馈 · Feedback</h2>
+      <span class="text-xs text-slate-600">两个 mode 的 brief 互相独立，可分别迭代</span>
+    </div>
+    <p class="text-xs text-slate-500">
+      告诉 Agent 如何修改（如：视觉关键词偏 cyber、目标受众太宽、增加某个卖点）。留空提交则触发无指导重写。
+    </p>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/iterate"
+          hx-target="#action-result"
+          hx-swap="innerHTML">
+      <textarea
+        name="feedback"
+        rows="3"
+        class="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 focus:outline-none rounded px-3 py-2 text-sm font-mono text-slate-200 placeholder-slate-600 transition"
+        placeholder="例如：『视觉关键词去掉科技蓝，加入复古胶片质感』..."></textarea>
+      <input type="hidden" name="mode" id="mode-field" value="standard" />
+      <div class="flex items-center gap-2 mt-3 flex-wrap">
+        <button type="submit"
+                onclick="document.getElementById('mode-field').value='standard'"
+                class="inline-flex items-center gap-2 px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 rounded transition">
+          <span>↻</span>
+          <span>{{ '重新生成' if has_standard else '生成' }}（标准）</span>
+        </button>
+        <button type="submit"
+                onclick="document.getElementById('mode-field').value='deep'"
+                class="inline-flex items-center gap-2 px-4 py-2 bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/40 text-purple-300 rounded transition"
+                title="Agent 会读 main 入口、依赖配置、源码、所有设计文档；耗时 60–120s">
+          <span>🔬</span>
+          <span>{{ '重新生成深度' if has_deep else '深度分析（读源码）' }}</span>
+        </button>
+        <span class="ml-auto text-xs text-slate-600 italic">标准 ≈ 30–50s · 深度 ≈ 60–120s</span>
+      </div>
+    </form>
+  </div>
+
+  <!-- Approve: only enabled if at least one version exists -->
+  <div class="rounded-lg border {% if has_standard or has_deep %}border-emerald-700/40 bg-emerald-950/20{% else %}border-slate-800 bg-slate-900/30 opacity-60{% endif %} px-5 py-4">
+    <h2 class="text-sm font-semibold {% if has_standard or has_deep %}text-emerald-300{% else %}text-slate-500{% endif %} mb-2">
+      通过 · Approve
+    </h2>
+    {% if not has_standard and not has_deep %}
+    <p class="text-xs text-slate-500">还没有 brief 可通过。先生成一版再回来。</p>
+    {% else %}
+    <p class="text-xs text-slate-500 mb-3">选择最终采用的版本，进入 Phase 2（HTML 协作 + 录屏）。</p>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/approve"
+          hx-target="#action-result"
+          hx-swap="innerHTML"
+          hx-confirm="确认通过 Gate #1，进入 Phase 2？">
+      <fieldset class="flex items-center gap-4 flex-wrap mb-3">
+        {% if has_standard %}
+        <label class="inline-flex items-center gap-2 cursor-pointer">
+          <input type="radio" name="version" value="standard"
+                 {% if not has_deep %}checked{% endif %}
+                 class="accent-amber-500" />
+          <span class="text-sm"><span class="text-amber-400">📄</span> 标准版</span>
+        </label>
+        {% endif %}
+        {% if has_deep %}
+        <label class="inline-flex items-center gap-2 cursor-pointer">
+          <input type="radio" name="version" value="deep" checked
+                 class="accent-purple-500" />
+          <span class="text-sm"><span class="text-purple-400">🔬</span> 深度版</span>
+        </label>
+        {% endif %}
+      </fieldset>
+      <button type="submit"
+              class="inline-flex items-center gap-2 px-5 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/50 text-emerald-300 rounded transition font-medium">
+        <span>✓</span>
+        <span>通过 → Phase 2</span>
+      </button>
+    </form>
+    {% endif %}
+  </div>
+
+</div>
