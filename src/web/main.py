@@ -594,10 +594,37 @@ async def phase2_panel(project: str, run_id: str, request: Request):
              "score": w.score, "score_reasons": w.score_reasons}
             for w in ranked
         ]
+        # Smart demo state (LLM-planned playwright recording with synced captions)
+        rec_dir = pipe.run_dir / "recordings"
+        demo_script_path = rec_dir / "demo_script.json"
+        demo_recording_path = rec_dir / "demo_recording.mp4"
+        demo_timings_path = rec_dir / "demo_timings.json"
+        demo_script_obj = None
+        demo_timings_obj = None
+        if demo_script_path.exists():
+            try:
+                demo_script_obj = json.loads(demo_script_path.read_text(encoding="utf-8"))
+            except Exception:
+                demo_script_obj = {"steps": [], "_load_error": True}
+        if demo_timings_path.exists():
+            try:
+                demo_timings_obj = json.loads(demo_timings_path.read_text(encoding="utf-8"))
+            except Exception:
+                demo_timings_obj = None
+
+        demo_state = {
+            "run_dir": str(pipe.run_dir),
+            "demo_script_exists": demo_script_path.exists(),
+            "demo_recording_exists": demo_recording_path.exists(),
+            "demo_script": demo_script_obj,
+            "demo_timings": demo_timings_obj,
+        }
+
         return TEMPLATES.TemplateResponse(request, "_phase_2b_ready.html", {
             "project": project, "run_id": run_id,
             "windows": windows,
             "exec_state": exec_state,
+            "state": demo_state,
         })
 
     # 7. exec running / failed — show executing panel
@@ -859,6 +886,158 @@ async def status_chip(project: str, run_id: str):
         'border border-slate-600 text-slate-400 text-xs rounded">'
         'Idle'
         '</span>'
+    )
+
+
+# ────────────────────────────────────────────────────────────
+# Phase 2B · Smart Demo (LLM plan → playwright record → captions)
+# ────────────────────────────────────────────────────────────
+
+def _service_url(pipe: Pipeline) -> Optional[str]:
+    """Read services.json and return the first service's health_url."""
+    sf = pipe.run_dir / "services.json"
+    if not sf.exists():
+        return None
+    try:
+        data = json.loads(sf.read_text(encoding="utf-8"))
+        services = data.get("services", data) if isinstance(data, dict) else data
+        if isinstance(services, list) and services:
+            s0 = services[0]
+            return s0.get("health_url") or s0.get("url")
+    except Exception:
+        pass
+    return None
+
+
+@app.post("/runs/{project}/{run_id}/plan_demo", response_class=HTMLResponse)
+async def plan_demo_route(project: str, run_id: str):
+    """Kick off LLM demo planner in background."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    url = _service_url(pipe)
+    if not url:
+        return HTMLResponse(
+            '<div class="text-rose-400 text-sm">没找到服务 URL — 先确保 Phase 2A services 起来了</div>',
+            status_code=400,
+        )
+    brief_path = pipe.run_dir / "project_brief.md"
+    if not brief_path.exists():
+        return HTMLResponse(
+            '<div class="text-rose-400 text-sm">缺 project_brief.md（先完成 Phase 1）</div>',
+            status_code=400,
+        )
+
+    asyncio.create_task(_plan_demo_async(pipe, url, brief_path))
+    return HTMLResponse(
+        '<div class="text-amber-300 text-sm py-2">⏳ LLM 规划 demo 中（snapshot DOM + 选 5-8 步）...</div>',
+        headers={"HX-Trigger": "phase2-refresh"},
+    )
+
+
+async def _plan_demo_async(pipe: Pipeline, service_url: str, brief_path: Path) -> None:
+    await REGISTRY.mark_running(pipe.run_id, "phase2b-demo-plan")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..agents.demo_planner import plan_demo
+        out = pipe.run_dir / "recordings" / "demo_script.json"
+        brief = brief_path.read_text(encoding="utf-8")
+        await asyncio.to_thread(plan_demo, pipe.run_dir, service_url, brief, out, 25.0)
+    except Exception as e:
+        pipe.log.exception(f"plan_demo failed: {e}")
+        pipe.bus.emit("asset_failed", agent="demo_planner",
+                      error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+@app.post("/runs/{project}/{run_id}/record_demo", response_class=HTMLResponse)
+async def record_demo_route(project: str, run_id: str):
+    """Execute the existing demo_script + record + write captions."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    script = pipe.run_dir / "recordings" / "demo_script.json"
+    if not script.exists():
+        return HTMLResponse(
+            '<div class="text-rose-400 text-sm">先点 "📐 LLM 规划 demo" 生成 demo_script.json</div>',
+            status_code=400,
+        )
+    asyncio.create_task(_record_demo_async(pipe, script))
+    return HTMLResponse(
+        '<div class="text-amber-300 text-sm py-2">⏳ 执行 demo + 录屏 + 同步字幕中（25-45s）...</div>',
+        headers={"HX-Trigger": "phase2-refresh"},
+    )
+
+
+async def _record_demo_async(pipe: Pipeline, script_path: Path) -> None:
+    await REGISTRY.mark_running(pipe.run_id, "phase2b-demo-record")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..tools.demo_executor import execute_demo
+        from ..tools.captions import write_caption_tracks
+        rec_dir = pipe.run_dir / "recordings"
+        out_video = rec_dir / "demo_recording.mp4"
+        timings_path = rec_dir / "demo_timings.json"
+        await asyncio.to_thread(
+            execute_demo, script_path, out_video, timings_path,
+            1920, 1080, True,
+        )
+        # Write captions immediately so UI can show count + preview
+        await asyncio.to_thread(write_caption_tracks, timings_path, rec_dir)
+    except Exception as e:
+        pipe.log.exception(f"record_demo failed: {e}")
+        pipe.bus.emit("asset_failed", agent="demo_executor",
+                      error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+@app.post("/runs/{project}/{run_id}/accept_demo", response_class=HTMLResponse)
+async def accept_demo_route(project: str, run_id: str,
+                              with_captions: str = Form("none")):
+    """Finalize demo recording → recordings/test.mp4.
+
+    with_captions ∈ {"zh", "en", "none"}.
+    "zh"/"en" → ffmpeg burn-in. "none" → just rename/copy demo_recording.mp4.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    rec_dir = pipe.run_dir / "recordings"
+    src = rec_dir / "demo_recording.mp4"
+    if not src.exists():
+        return HTMLResponse(
+            '<div class="text-rose-400 text-sm">demo_recording.mp4 不存在 — 先录</div>',
+            status_code=400,
+        )
+    target = rec_dir / "test.mp4"
+    try:
+        if with_captions in ("zh", "en"):
+            from ..tools.captions import burn_captions
+            srt = rec_dir / f"captions_{with_captions}.srt"
+            if not srt.exists():
+                return HTMLResponse(
+                    f'<div class="text-rose-400 text-sm">缺 {srt.name}</div>',
+                    status_code=400,
+                )
+            await asyncio.to_thread(burn_captions, src, srt, target, 28, 64)
+        else:
+            import shutil
+            await asyncio.to_thread(shutil.copy2, src, target)
+        pipe.record_asset("recording_test", target, verified=True,
+                          source="demo_executor",
+                          captions=with_captions)
+        pipe.bus.emit("asset_verified", agent="pipeline",
+                      name="recording_test", path=str(target),
+                      captions=with_captions)
+    except Exception as e:
+        pipe.log.exception(f"accept_demo failed: {e}")
+        return HTMLResponse(
+            f'<div class="text-rose-400 text-sm">accept_demo 失败: {type(e).__name__}: {e}</div>',
+            status_code=500,
+        )
+    label = {"zh": "中文字幕", "en": "English captions", "none": "无字幕"}[with_captions]
+    return HTMLResponse(
+        f'<div class="text-emerald-400 text-sm py-2">✅ 已采纳 ({label}) → recordings/test.mp4</div>',
+        headers={"HX-Trigger": "phase2-refresh"},
     )
 
 

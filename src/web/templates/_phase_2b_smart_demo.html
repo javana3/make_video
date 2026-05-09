@@ -1,0 +1,143 @@
+<!-- M2b · Smart demo: LLM plan + playwright record with synced captions -->
+
+{% set rec = state.run_dir + "/recordings" %}
+{% set demo_script_exists = state.demo_script_exists %}
+{% set demo_recording_exists = state.demo_recording_exists %}
+{% set demo_script = state.demo_script %}
+{% set demo_timings = state.demo_timings %}
+
+<div class="rounded-lg border border-violet-700/40 bg-violet-950/20 px-5 py-5 space-y-4">
+  <div class="flex items-center gap-2">
+    <span class="text-base font-semibold text-violet-200">🤖 智能 demo 录制</span>
+    <span class="text-xs text-slate-500">LLM 规划 demo · playwright 跟拍 · 字幕实时同步</span>
+  </div>
+
+  {% if not demo_script_exists %}
+  <!-- ── State 1: nothing yet — show "Plan Demo" button ── -->
+  <div class="space-y-2">
+    <p class="text-sm text-slate-300">
+      Agent 会读 brief，打开服务 URL 抓 DOM 快照，规划 5-8 步演示动作（每步带中英字幕）。
+    </p>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/plan_demo" hx-target="#action-result" hx-swap="innerHTML">
+      <button type="submit"
+              class="px-4 py-2 bg-violet-600 hover:bg-violet-500 text-white text-sm rounded-lg font-semibold">
+        📐 LLM 规划 demo（~30s LLM call + DOM snapshot）
+      </button>
+    </form>
+  </div>
+
+  {% elif not demo_recording_exists %}
+  <!-- ── State 2: demo_script.json exists — let user review then record ── -->
+  <div class="space-y-3">
+    <div class="text-sm text-slate-300">
+      ✅ Demo 已规划：{{ demo_script.steps|length }} 步 · 目标 {{ demo_script.duration_s }}s
+    </div>
+    <details open class="rounded-lg border border-slate-700 bg-slate-950/50">
+      <summary class="cursor-pointer px-3 py-2 text-xs text-slate-400 font-mono">📋 demo_script.json — 点开看每步</summary>
+      <ol class="px-4 py-2 space-y-1 text-xs">
+        {% for s in demo_script.steps %}
+        <li class="flex gap-3 border-b border-slate-800/50 py-1 last:border-0">
+          <span class="font-mono text-violet-300">{{ s.id }}</span>
+          <span class="font-mono text-amber-300 w-16">{{ s.action }}</span>
+          <span class="font-mono text-slate-500 truncate flex-1" title="{{ s.target or s.url or s.text or '' }}">
+            {{ s.target or s.url or s.text or '' }}
+          </span>
+          <span class="text-emerald-300">{{ s.caption_zh }}</span>
+          <span class="text-slate-500">{{ s.wait_after_s }}s</span>
+        </li>
+        {% endfor %}
+      </ol>
+    </details>
+    <div class="flex gap-2 flex-wrap">
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/record_demo" hx-target="#action-result" hx-swap="innerHTML">
+        <button type="submit"
+                class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm rounded-lg font-semibold">
+          🎬 录制 + 跟拍字幕
+        </button>
+      </form>
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/plan_demo" hx-target="#action-result" hx-swap="innerHTML">
+        <button type="submit"
+                class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm rounded-lg">
+          ↻ 重新规划
+        </button>
+      </form>
+    </div>
+  </div>
+
+  {% else %}
+  <!-- ── State 3: demo_recording.mp4 exists — show video + caption choice ── -->
+  <div class="space-y-3">
+    <div class="text-sm text-slate-300 flex items-center gap-3 flex-wrap">
+      ✅ 录屏完成：
+      <span class="font-mono text-xs text-violet-300">{{ "%.1f"|format(demo_timings.video_duration_s) }}s</span>
+      <span class="font-mono text-xs text-slate-500">{{ demo_timings.n_steps }} steps</span>
+      {% if demo_timings.n_errors %}
+      <span class="text-xs text-rose-400">{{ demo_timings.n_errors }} step error(s)</span>
+      {% endif %}
+    </div>
+
+    <video src="/runs/{{ project }}/{{ run_id }}/artifacts/recordings/demo_recording.mp4"
+           controls class="w-full max-h-[60vh] rounded-lg border border-slate-700 bg-black"></video>
+
+    <details class="rounded-lg border border-slate-700 bg-slate-950/50">
+      <summary class="cursor-pointer px-3 py-2 text-xs text-slate-400 font-mono">📝 字幕预览（每条带时间戳）</summary>
+      <ol class="px-4 py-2 space-y-1 text-xs font-mono">
+        {% for s in demo_timings.steps %}
+        {% if s.caption_zh or s.caption_en %}
+        <li class="flex gap-3 border-b border-slate-800/50 py-1 last:border-0">
+          <span class="text-slate-500 w-24">{{ "%.1f"|format(s.t_start) }}–{{ "%.1f"|format(s.t_end) }}s</span>
+          <span class="text-emerald-300 flex-1">{{ s.caption_zh }}</span>
+          <span class="text-sky-300 flex-1">{{ s.caption_en }}</span>
+          {% if s.status == "error" %}<span class="text-rose-400">⚠ {{ s.error[:50] }}</span>{% endif %}
+        </li>
+        {% endif %}
+        {% endfor %}
+      </ol>
+    </details>
+
+    <div class="border-t border-slate-700 pt-3">
+      <p class="text-xs text-slate-400 mb-2">采纳为 recordings/test.mp4：</p>
+      <div class="flex gap-2 flex-wrap">
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_demo" hx-target="#action-result" hx-swap="innerHTML">
+          <input type="hidden" name="with_captions" value="zh"/>
+          <button type="submit"
+                  class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded font-semibold"
+                  hx-confirm="将 demo_recording.mp4 + 中文字幕 烧成 test.mp4？">
+            ✓ 接受 + 中文字幕
+          </button>
+        </form>
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_demo" hx-target="#action-result" hx-swap="innerHTML">
+          <input type="hidden" name="with_captions" value="en"/>
+          <button type="submit"
+                  class="px-3 py-2 bg-sky-600 hover:bg-sky-500 text-white text-xs rounded font-semibold"
+                  hx-confirm="将 demo_recording.mp4 + English captions 烧成 test.mp4？">
+            ✓ Accept + EN captions
+          </button>
+        </form>
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_demo" hx-target="#action-result" hx-swap="innerHTML">
+          <input type="hidden" name="with_captions" value="none"/>
+          <button type="submit"
+                  class="px-3 py-2 bg-slate-600 hover:bg-slate-500 text-white text-xs rounded font-semibold">
+            ✓ 接受 无字幕
+          </button>
+        </form>
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/record_demo" hx-target="#action-result" hx-swap="innerHTML">
+          <button type="submit"
+                  class="px-3 py-2 bg-amber-700 hover:bg-amber-600 text-white text-xs rounded font-semibold"
+                  hx-confirm="按当前 demo_script 重录一次（覆盖 demo_recording.mp4）？">
+            ↻ 重录
+          </button>
+        </form>
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/plan_demo" hx-target="#action-result" hx-swap="innerHTML">
+          <button type="submit"
+                  class="px-3 py-2 bg-rose-700 hover:bg-rose-600 text-white text-xs rounded font-semibold"
+                  hx-confirm="重新让 LLM 规划 demo_script（覆盖现 script + 录屏）？">
+            ↻ 重新规划
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  {% endif %}
+</div>

@@ -12,6 +12,14 @@
     <div class="mt-3">{% include "_phase_2_executing.html" %}</div>
   </details>
 
+  <!-- Smart demo: LLM plan + playwright record + synced captions -->
+  {% include "_phase_2b_smart_demo.html" %}
+
+  <details class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
+    <summary class="cursor-pointer text-sm text-slate-400">📹 备选：录系统窗口（ffmpeg gdigrab，桌面应用专用）</summary>
+    <div class="mt-3 text-xs text-slate-500 mb-2">
+      智能 demo 适合 web 应用。本地桌面应用 / 复杂 GUI 用这里手选窗口录。
+    </div>
   <div class="rounded-lg border border-slate-800 bg-slate-900/50 px-5 py-5 space-y-3">
     <div class="flex items-center justify-between flex-wrap gap-2">
       <h2 class="text-base font-semibold text-slate-100">🎬 M2b · 选要录的窗口</h2>
@@ -77,5 +85,6 @@
       </div>
     </form>
   </div>
+  </details>
 
 </div>
