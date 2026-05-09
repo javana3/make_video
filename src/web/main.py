@@ -29,6 +29,33 @@ md_renderer = MarkdownIt("commonmark", {"breaks": True, "linkify": True}).enable
 
 app = FastAPI(title="Promo Video Pipeline UI")
 
+
+@app.middleware("http")
+async def normalize_empty_run_ids(request: Request, call_next):
+    """`/runs///observability` (empty project + run_id from manual URL or stale
+    template) should land on the global Trace dashboard instead of bare 404.
+
+    Catches any `/runs/.../observability|trace|logs|opendesign` where one or
+    more path segments are empty (consecutive slashes) and redirects to the
+    global aggregator (or home if no obvious aggregator).
+    """
+    from fastapi.responses import RedirectResponse
+    raw = request.url.path
+    if "//" in raw:
+        # Collapse consecutive slashes to detect malformed IDs
+        compact = "/" + "/".join(seg for seg in raw.split("/") if seg)
+        # If after compacting we lose path segments, project/run_id were empty
+        if compact != raw:
+            tail = compact.rsplit("/", 1)[-1]
+            if tail in ("observability", "trace", "traces", "logs"):
+                return RedirectResponse(url="/observability", status_code=302)
+            if tail in ("opendesign", "opendesign/preview", "opendesign/artifacts"):
+                return RedirectResponse(url="/", status_code=302)
+            # Generic: if path looks like /runs/.../<X> with empty IDs, go home
+            if compact.startswith("/runs/"):
+                return RedirectResponse(url="/", status_code=302)
+    return await call_next(request)
+
 WORKSPACE_ROOT = Path.cwd() / "workspace"
 
 
@@ -973,6 +1000,35 @@ async def observability_alias(project: str, run_id: str):
     """Convenience aliases — redirect to /observability."""
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url=f"/runs/{project}/{run_id}/observability", status_code=302)
+
+
+@app.get("/observability", response_class=HTMLResponse)
+@app.get("/trace", response_class=HTMLResponse)
+@app.get("/traces", response_class=HTMLResponse)
+@app.get("/logs", response_class=HTMLResponse)
+async def observability_global(request: Request):
+    """Global Trace + Logs dashboard — lists all runs with their event counts."""
+    runs_data = []
+    for r in _list_runs():
+        run_dir = WORKSPACE_ROOT / r["project"] / "runs" / r["run_id"]
+        events = _read_events(run_dir, limit=10000)
+        summary = _events_summary(events)
+        log_files = _summarize_logs(run_dir)
+        runs_data.append({
+            "project": r["project"],
+            "run_id": r["run_id"],
+            "phase": r["phase"],
+            "gate": r["gate"],
+            "events_total": summary["total"],
+            "asset_verified": summary["asset_verified"],
+            "asset_failed": summary["asset_failed"],
+            "n_logs": len(log_files),
+            "last_event": events[-1] if events else None,
+        })
+    return TEMPLATES.TemplateResponse(request, "observability_global.html", {
+        "runs": runs_data,
+        "phoenix_url": "http://localhost:6006/",
+    })
 
 
 @app.get("/runs/{project}/{run_id}/observability", response_class=HTMLResponse)

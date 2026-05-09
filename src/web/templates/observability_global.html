@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Trace + Logs · 全局{% endblock %}
+
+{% block breadcrumb %}
+<span class="text-slate-600 mx-2">/</span>
+<span class="text-emerald-300">📊 Observability · 全局</span>
+{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <div class="flex items-baseline justify-between flex-wrap gap-3">
+    <div>
+      <h1 class="text-2xl font-bold tracking-tight">📊 Observability · 全局</h1>
+      <p class="text-xs text-slate-500 mt-1">所有 run 的 trace + log 总览，点进去看具体一条</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <a href="{{ phoenix_url }}" target="_blank"
+         class="text-xs px-3 py-1.5 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/40 text-indigo-300 rounded transition">
+        🔭 Phoenix UI →
+      </a>
+      <a href="/"
+         class="text-xs px-3 py-1.5 bg-slate-700/50 hover:bg-slate-700 border border-slate-600 text-slate-300 rounded transition">
+        ← Home
+      </a>
+    </div>
+  </div>
+
+  {% if not runs %}
+  <div class="rounded-xl border border-slate-800 bg-slate-900/40 px-6 py-8 text-center text-slate-500">
+    还没有 run。先在 <a class="underline text-emerald-400" href="/">首页</a>新建一个。
+  </div>
+  {% else %}
+  <div class="grid gap-3">
+    {% for r in runs %}
+    <a href="/runs/{{ r.project }}/{{ r.run_id }}/observability"
+       class="group block rounded-xl border border-slate-800 hover:border-emerald-500/50 bg-slate-900/40 hover:bg-slate-900 px-5 py-4 transition">
+      <div class="flex items-start justify-between gap-4">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-3 mb-1">
+            <span class="text-base font-semibold text-slate-100 group-hover:text-emerald-400 transition">{{ r.project }}</span>
+            <span class="font-mono text-xs px-2 py-0.5 bg-slate-800 rounded text-slate-400">{{ r.run_id }}</span>
+            {% if r.gate == 'done' %}
+              <span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">done</span>
+            {% elif r.gate.startswith('waiting_') %}
+              <span class="px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-300 border border-amber-500/40">waiting</span>
+            {% else %}
+              <span class="px-2 py-0.5 rounded text-xs bg-sky-500/20 text-sky-300 border border-sky-500/40">running</span>
+            {% endif %}
+          </div>
+          <div class="flex items-center gap-4 text-xs text-slate-500 flex-wrap">
+            <span>Phase <span class="text-slate-300 font-medium">{{ r.phase }}/5</span></span>
+            <span>📊 events <span class="text-slate-300 font-medium">{{ r.events_total }}</span></span>
+            <span>✅ <span class="text-emerald-300">{{ r.asset_verified }}</span></span>
+            {% if r.asset_failed %}
+            <span>❌ <span class="text-rose-300">{{ r.asset_failed }}</span></span>
+            {% endif %}
+            <span>📁 <span class="text-slate-300">{{ r.n_logs }}</span> log files</span>
+          </div>
+          {% if r.last_event %}
+          <div class="mt-2 text-[11px] text-slate-600 font-mono truncate">
+            最近: {{ r.last_event.ts[11:19] }} · <span class="text-slate-400">{{ r.last_event.event }}</span> · {{ r.last_event.agent }}
+          </div>
+          {% endif %}
+        </div>
+        <div class="text-emerald-400 opacity-0 group-hover:opacity-100 transition text-sm">
+          → 看 trace
+        </div>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
