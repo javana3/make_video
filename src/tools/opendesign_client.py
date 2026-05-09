@@ -35,13 +35,33 @@ import httpx
 # 502 Bad Gateway via WinINET on a 127.0.0.1 daemon), routing 127.0.0.1
 # through that proxy fails. trust_env=False sidesteps both env + registry.
 def _get(url: str, **kwargs):
-    with httpx.Client(trust_env=False) as c:
-        return c.get(url, **kwargs)
+    from ..observability.audit import traced_step
+    with traced_step(f"http.GET {_short_url(url)}", url=url, method="GET") as span:
+        with httpx.Client(trust_env=False) as c:
+            r = c.get(url, **kwargs)
+        span.set_attribute("http.status_code", r.status_code)
+        span.set_attribute("http.response_size", len(r.content))
+        return r
 
 
 def _post(url: str, **kwargs):
-    with httpx.Client(trust_env=False) as c:
-        return c.post(url, **kwargs)
+    from ..observability.audit import traced_step
+    with traced_step(f"http.POST {_short_url(url)}", url=url, method="POST") as span:
+        with httpx.Client(trust_env=False) as c:
+            r = c.post(url, **kwargs)
+        span.set_attribute("http.status_code", r.status_code)
+        span.set_attribute("http.response_size", len(r.content))
+        return r
+
+
+def _short_url(url: str) -> str:
+    """Strip host, keep just /api/path for cleaner span names."""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        return p.path or url
+    except Exception:
+        return url[-60:]
 from loguru import logger
 
 

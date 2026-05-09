@@ -21,7 +21,7 @@ from typing import Optional
 
 from loguru import logger
 
-from ..observability.audit import get_run_context, traced_agent
+from ..observability.audit import get_run_context, traced_agent, traced_step
 from ..observability.logger import agent_logger
 
 
@@ -89,8 +89,11 @@ def generate_bgm(scaffold_path: Path,
     )
 
     log.info(f"loading via {ModelCls.__name__} (first run downloads ~3 GB) ...")
-    model = ModelCls.from_pretrained(model_name, torch_dtype=dtype).to(device)
-    processor = AutoProcessor.from_pretrained(model_name)
+    with traced_step("MusicGen.load_model", model_class=ModelCls.__name__,
+                       model_name=model_name, dtype=str(dtype), device=device):
+        model = ModelCls.from_pretrained(model_name, torch_dtype=dtype).to(device)
+    with traced_step("MusicGen.load_processor", model_name=model_name):
+        processor = AutoProcessor.from_pretrained(model_name)
     elapsed_load = time.monotonic() - t0
     log.info(f"model loaded in {elapsed_load:.1f}s")
 
@@ -100,36 +103,42 @@ def generate_bgm(scaffold_path: Path,
     log.info(f"prompt:        {prompt!r}")
     log.info(f"max_new_tokens: {max_new_tokens}  (~{duration_s}s)")
 
-    if use_melody:
-        log.info(f"loading scaffold: {scaffold_path}")
-        melody, sr = torchaudio.load(str(scaffold_path))
-        # MusicGen-melody expects mono input
-        if melody.shape[0] > 1:
-            melody = melody.mean(dim=0, keepdim=True)
-        melody_np = melody.squeeze(0).numpy()
-        inputs = processor(
-            audio=melody_np,
-            sampling_rate=sr,
-            text=[prompt],
-            padding=True,
-            return_tensors="pt",
-        ).to(device)
-    else:
-        inputs = processor(
-            text=[prompt],
-            padding=True,
-            return_tensors="pt",
-        ).to(device)
+    with traced_step("MusicGen.tokenize_inputs", use_melody=use_melody,
+                       prompt_len=len(prompt)):
+        if use_melody:
+            log.info(f"loading scaffold: {scaffold_path}")
+            melody, sr = torchaudio.load(str(scaffold_path))
+            # MusicGen-melody expects mono input
+            if melody.shape[0] > 1:
+                melody = melody.mean(dim=0, keepdim=True)
+            melody_np = melody.squeeze(0).numpy()
+            inputs = processor(
+                audio=melody_np,
+                sampling_rate=sr,
+                text=[prompt],
+                padding=True,
+                return_tensors="pt",
+            ).to(device)
+        else:
+            inputs = processor(
+                text=[prompt],
+                padding=True,
+                return_tensors="pt",
+            ).to(device)
 
     log.info("generating (this is the slow part — 30s-10min depending on hardware) ...")
     t1 = time.monotonic()
-    with torch.no_grad():
-        audio_values = model.generate(
-            **inputs,
-            do_sample=True,
-            guidance_scale=3,
-            max_new_tokens=max_new_tokens,
-        )
+    with traced_step("MusicGen.generate",
+                       max_new_tokens=max_new_tokens,
+                       guidance_scale=3, do_sample=True,
+                       device=device, dtype=str(dtype)):
+        with torch.no_grad():
+            audio_values = model.generate(
+                **inputs,
+                do_sample=True,
+                guidance_scale=3,
+                max_new_tokens=max_new_tokens,
+            )
     elapsed_gen = time.monotonic() - t1
     log.info(f"generated in {elapsed_gen:.1f}s")
 
@@ -137,8 +146,10 @@ def generate_bgm(scaffold_path: Path,
     out_sr = model.config.audio_encoder.sampling_rate
     audio_np = audio_values[0, 0].cpu().float().numpy()
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(str(output_path), audio_np, out_sr)
+    with traced_step("MusicGen.write_wav", path=str(output_path),
+                       samples=len(audio_np), sample_rate=out_sr):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        sf.write(str(output_path), audio_np, out_sr)
     log.info(f"saved {output_path} ({output_path.stat().st_size}B, {out_sr}Hz)")
     bus = get_run_context().get("event_bus")
     if bus is not None:

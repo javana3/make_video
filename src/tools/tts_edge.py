@@ -17,7 +17,7 @@ from loguru import logger
 
 import edge_tts
 
-from ..observability.audit import get_run_context, traced_agent
+from ..observability.audit import get_run_context, traced_agent, traced_step
 from ..observability.logger import agent_logger
 
 
@@ -84,7 +84,13 @@ def synth_script(script_path: Path, out_dir: Path) -> dict:
             # ffmpeg in voice_timeline read it directly.
             out_path = out_dir / f"{entry.id}.mp3"
             log.info(f"synth {entry.id}  voice={voice}  text={entry.text[:50]!r}")
-            loop.run_until_complete(_synth_one(entry, out_path))
+            with traced_step(f"edge_tts.synth_{entry.id}",
+                               cue_id=entry.id, voice=voice, lang=entry.lang,
+                               text=entry.text, t_start=entry.t_start,
+                               t_end=entry.t_end) as _step_span:
+                loop.run_until_complete(_synth_one(entry, out_path))
+                _step_span.set_attribute("step.output_size_bytes",
+                                            out_path.stat().st_size)
             sz = out_path.stat().st_size
             results.append({
                 "id": entry.id, "voice": voice, "path": str(out_path),
