@@ -10,6 +10,10 @@
   <a href="README.ko.md">한국어</a>
 </p>
 
+<p align="center">
+  <img src="docs/workflow.svg" alt="Workflow diagram" width="100%"/>
+</p>
+
 ---
 
 ## ✨ 核心特点

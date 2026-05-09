@@ -10,6 +10,10 @@
   <a href="README.ko.md"><b>한국어</b></a>
 </p>
 
+<p align="center">
+  <img src="docs/workflow.svg" alt="Workflow diagram" width="100%"/>
+</p>
+
 ---
 
 ## ✨ 주요 기능

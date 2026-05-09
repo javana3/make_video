@@ -1,0 +1,341 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1680" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif">
+  <!-- ╭──────────────────────── Defs ────────────────────────╮ -->
+  <defs>
+    <!-- Background dot pattern -->
+    <pattern id="dots" x="0" y="0" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#1e293b" opacity="0.45"/>
+    </pattern>
+
+    <!-- Soft drop shadow for cards -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6"/>
+      <feOffset dx="0" dy="4" result="offsetblur"/>
+      <feFlood flood-color="#000" flood-opacity="0.35"/>
+      <feComposite in2="offsetblur" operator="in"/>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Glow for phase badges -->
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Phase gradients (modern + rounded vibe) -->
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"  stop-color="#6366F1"/>
+      <stop offset="100%" stop-color="#4F46E5"/>
+    </linearGradient>
+    <linearGradient id="g2a" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"  stop-color="#A855F7"/>
+      <stop offset="100%" stop-color="#7E22CE"/>
+    </linearGradient>
+    <linearGradient id="g2b" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"  stop-color="#22D3EE"/>
+      <stop offset="100%" stop-color="#0891B2"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"  stop-color="#FBBF24"/>
+      <stop offset="100%" stop-color="#D97706"/>
+    </linearGradient>
+    <linearGradient id="g4" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"  stop-color="#F472B6"/>
+      <stop offset="100%" stop-color="#DB2777"/>
+    </linearGradient>
+    <linearGradient id="g5" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"  stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+
+    <!-- Card overlay for inner contrast -->
+    <linearGradient id="cardOverlay" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+
+    <!-- Output card gradient -->
+    <linearGradient id="gOutput" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"  stop-color="#F8FAFC"/>
+      <stop offset="100%" stop-color="#E2E8F0"/>
+    </linearGradient>
+
+    <!-- Gate pill gradient -->
+    <linearGradient id="gGate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#FDE68A"/>
+      <stop offset="100%" stop-color="#FBBF24"/>
+    </linearGradient>
+
+    <!-- Arrow markers -->
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L14,7 L0,14 L4,7 Z" fill="#94A3B8"/>
+    </marker>
+    <marker id="arrowDark" markerWidth="14" markerHeight="14" refX="12" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L14,7 L0,14 L4,7 Z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <!-- ╭──────────────────────── Background ────────────────────────╮ -->
+  <rect width="1280" height="1680" fill="#0F172A"/>
+  <rect width="1280" height="1680" fill="url(#dots)"/>
+
+  <!-- ╭──────────────────────── Title ────────────────────────╮ -->
+  <text x="640" y="60" text-anchor="middle" fill="#F1F5F9" font-size="34" font-weight="700" letter-spacing="-0.02em">Promo Video Pipeline</text>
+  <text x="640" y="92" text-anchor="middle" fill="#94A3B8" font-size="14" font-weight="500" letter-spacing="0.05em">5 PHASE · 6 AGENT · 5 HUMAN GATE</text>
+
+  <!-- ╭──────────────────────── Source ────────────────────────╮ -->
+  <g>
+    <rect x="500" y="130" width="280" height="56" rx="28" fill="#1E293B" stroke="#334155" stroke-width="1.5"/>
+    <text x="640" y="165" text-anchor="middle" fill="#E2E8F0" font-size="15" font-weight="600">📦  GitHub Repo URL</text>
+  </g>
+  <line x1="640" y1="186" x2="640" y2="220" stroke="#475569" stroke-width="2" stroke-dasharray="0" marker-end="url(#arrowDark)"/>
+
+  <!-- ╭──────────────────────── Phase 1 · Analyzer ────────────────────────╮ -->
+  <g filter="url(#shadow)">
+    <rect x="440" y="225" width="400" height="125" rx="22" fill="url(#g1)"/>
+    <rect x="440" y="225" width="400" height="50" rx="22" fill="url(#cardOverlay)"/>
+    <!-- badge -->
+    <circle cx="486" cy="265" r="32" fill="#312E81" filter="url(#glow)"/>
+    <text x="486" y="276" text-anchor="middle" fill="#E0E7FF" font-size="26" font-weight="800">1</text>
+    <!-- text -->
+    <text x="538" y="261" fill="#F1F5F9" font-size="20" font-weight="700">Phase 1 · Analyzer</text>
+    <text x="538" y="284" fill="#C7D2FE" font-size="13" font-weight="500" letter-spacing="0.04em">AGENT 1 · PROJECT ANALYZER</text>
+    <!-- chips -->
+    <g font-size="11" font-weight="600">
+      <rect x="466" y="306" width="90" height="24" rx="12" fill="#1E1B4B" opacity="0.7"/>
+      <text x="511" y="323" text-anchor="middle" fill="#A5B4FC">git clone</text>
+      <rect x="566" y="306" width="120" height="24" rx="12" fill="#1E1B4B" opacity="0.7"/>
+      <text x="626" y="323" text-anchor="middle" fill="#A5B4FC">read README/source</text>
+      <rect x="696" y="306" width="120" height="24" rx="12" fill="#1E1B4B" opacity="0.7"/>
+      <text x="756" y="323" text-anchor="middle" fill="#A5B4FC">project_brief.md</text>
+    </g>
+  </g>
+
+  <!-- ⏸ Gate 1 -->
+  <g>
+    <line x1="640" y1="350" x2="640" y2="380" stroke="#475569" stroke-width="2"/>
+    <rect x="552" y="378" width="176" height="32" rx="16" fill="url(#gGate)" filter="url(#shadow)"/>
+    <text x="640" y="398" text-anchor="middle" fill="#7C2D12" font-size="13" font-weight="700">⏸ Gate 1 · 审 brief</text>
+    <line x1="640" y1="412" x2="640" y2="442" stroke="#475569" stroke-width="2" marker-end="url(#arrowDark)"/>
+  </g>
+
+  <!-- ╭──────────────────────── Phase 2 · Parallel Split ────────────────────────╮ -->
+  <!-- 'PHASE 2 · PARALLEL' caption -->
+  <g>
+    <rect x="540" y="446" width="200" height="22" rx="11" fill="#1E293B" stroke="#334155" stroke-width="1"/>
+    <text x="640" y="461" text-anchor="middle" fill="#94A3B8" font-size="11" font-weight="700" letter-spacing="0.15em">PHASE 2 · PARALLEL</text>
+  </g>
+  <!-- branching connectors -->
+  <path d="M 640 468 Q 640 490 360 510" fill="none" stroke="#475569" stroke-width="2" stroke-dasharray="4 4"/>
+  <path d="M 640 468 Q 640 490 920 510" fill="none" stroke="#475569" stroke-width="2" stroke-dasharray="4 4"/>
+
+  <!-- Phase 2A · OpenDesigner -->
+  <g filter="url(#shadow)">
+    <rect x="80" y="510" width="500" height="155" rx="22" fill="url(#g2a)"/>
+    <rect x="80" y="510" width="500" height="50" rx="22" fill="url(#cardOverlay)"/>
+    <circle cx="126" cy="550" r="32" fill="#581C87" filter="url(#glow)"/>
+    <text x="126" y="557" text-anchor="middle" fill="#F3E8FF" font-size="20" font-weight="800">2A</text>
+    <text x="178" y="546" fill="#FAF5FF" font-size="20" font-weight="700">OpenDesigner</text>
+    <text x="178" y="569" fill="#E9D5FF" font-size="13" font-weight="500" letter-spacing="0.04em">AGENT 6 · MOTION FILM (.MP4)</text>
+    <!-- chips -->
+    <g font-size="11" font-weight="600">
+      <rect x="106" y="591" width="120" height="24" rx="12" fill="#3B0764" opacity="0.6"/>
+      <text x="166" y="608" text-anchor="middle" fill="#E9D5FF">LLM picks skill</text>
+      <rect x="236" y="591" width="115" height="24" rx="12" fill="#3B0764" opacity="0.6"/>
+      <text x="293.5" y="608" text-anchor="middle" fill="#E9D5FF">hyperframes</text>
+      <rect x="361" y="591" width="115" height="24" rx="12" fill="#3B0764" opacity="0.6"/>
+      <text x="418.5" y="608" text-anchor="middle" fill="#E9D5FF">GSAP timeline</text>
+      <rect x="106" y="623" width="200" height="24" rx="12" fill="#3B0764" opacity="0.6"/>
+      <text x="206" y="640" text-anchor="middle" fill="#E9D5FF">multi-turn (User × Agent × OpenDesign)</text>
+      <rect x="316" y="623" width="160" height="24" rx="12" fill="#3B0764" opacity="0.6"/>
+      <text x="396" y="640" text-anchor="middle" fill="#E9D5FF">采纳 → Hero / Final</text>
+    </g>
+  </g>
+
+  <!-- Phase 2B · SetupRunner -->
+  <g filter="url(#shadow)">
+    <rect x="700" y="510" width="500" height="155" rx="22" fill="url(#g2b)"/>
+    <rect x="700" y="510" width="500" height="50" rx="22" fill="url(#cardOverlay)"/>
+    <circle cx="746" cy="550" r="32" fill="#155E75" filter="url(#glow)"/>
+    <text x="746" y="557" text-anchor="middle" fill="#CFFAFE" font-size="20" font-weight="800">2B</text>
+    <text x="798" y="546" fill="#ECFEFF" font-size="20" font-weight="700">SetupRunner</text>
+    <text x="798" y="569" fill="#A5F3FC" font-size="13" font-weight="500" letter-spacing="0.04em">AGENT 2 · SERVICES + RECORDING</text>
+    <!-- chips -->
+    <g font-size="11" font-weight="600">
+      <rect x="726" y="591" width="100" height="24" rx="12" fill="#083344" opacity="0.6"/>
+      <text x="776" y="608" text-anchor="middle" fill="#A5F3FC">检测项目</text>
+      <rect x="836" y="591" width="100" height="24" rx="12" fill="#083344" opacity="0.6"/>
+      <text x="886" y="608" text-anchor="middle" fill="#A5F3FC">装依赖</text>
+      <rect x="946" y="591" width="100" height="24" rx="12" fill="#083344" opacity="0.6"/>
+      <text x="996" y="608" text-anchor="middle" fill="#A5F3FC">起服务</text>
+      <rect x="1056" y="591" width="120" height="24" rx="12" fill="#083344" opacity="0.6"/>
+      <text x="1116" y="608" text-anchor="middle" fill="#A5F3FC">health check</text>
+      <rect x="726" y="623" width="100" height="24" rx="12" fill="#083344" opacity="0.6"/>
+      <text x="776" y="640" text-anchor="middle" fill="#A5F3FC">选窗口</text>
+      <rect x="836" y="623" width="120" height="24" rx="12" fill="#083344" opacity="0.6"/>
+      <text x="896" y="640" text-anchor="middle" fill="#A5F3FC">ffmpeg/playwright 录</text>
+      <rect x="966" y="623" width="160" height="24" rx="12" fill="#083344" opacity="0.6"/>
+      <text x="1046" y="640" text-anchor="middle" fill="#A5F3FC">recordings/test.mp4</text>
+    </g>
+  </g>
+
+  <!-- merge connectors -->
+  <path d="M 330 665 Q 330 695 640 720" fill="none" stroke="#475569" stroke-width="2" stroke-dasharray="4 4"/>
+  <path d="M 950 665 Q 950 695 640 720" fill="none" stroke="#475569" stroke-width="2" stroke-dasharray="4 4"/>
+
+  <!-- ⏸ Gate 2 -->
+  <g>
+    <rect x="500" y="720" width="280" height="32" rx="16" fill="url(#gGate)" filter="url(#shadow)"/>
+    <text x="640" y="740" text-anchor="middle" fill="#7C2D12" font-size="13" font-weight="700">⏸ Gate 2 · 审视觉资产 + 录屏窗口</text>
+    <line x1="640" y1="754" x2="640" y2="784" stroke="#475569" stroke-width="2" marker-end="url(#arrowDark)"/>
+  </g>
+
+  <!-- ╭──────────────────────── Phase 3 · Remotion ────────────────────────╮ -->
+  <g filter="url(#shadow)">
+    <rect x="380" y="790" width="520" height="125" rx="22" fill="url(#g3)"/>
+    <rect x="380" y="790" width="520" height="50" rx="22" fill="url(#cardOverlay)"/>
+    <circle cx="426" cy="830" r="32" fill="#7C2D12" filter="url(#glow)"/>
+    <text x="426" y="841" text-anchor="middle" fill="#FEF3C7" font-size="26" font-weight="800">3</text>
+    <text x="478" y="826" fill="#FFFBEB" font-size="20" font-weight="700">Phase 3 · RemotionComposer</text>
+    <text x="478" y="849" fill="#FDE68A" font-size="13" font-weight="500" letter-spacing="0.04em">AGENT 3 · REACT + TSX → MP4</text>
+    <g font-size="11" font-weight="600">
+      <rect x="406" y="871" width="200" height="24" rx="12" fill="#451A03" opacity="0.7"/>
+      <text x="506" y="888" text-anchor="middle" fill="#FDE68A">M3a · cutting_plan.json</text>
+      <rect x="616" y="871" width="155" height="24" rx="12" fill="#451A03" opacity="0.7"/>
+      <text x="693.5" y="888" text-anchor="middle" fill="#FDE68A">M3b · TSX render</text>
+      <rect x="781" y="871" width="100" height="24" rx="12" fill="#451A03" opacity="0.7"/>
+      <text x="831" y="888" text-anchor="middle" fill="#FDE68A">v1.mp4</text>
+    </g>
+  </g>
+
+  <!-- ⏸ Gate 3 -->
+  <g>
+    <line x1="640" y1="915" x2="640" y2="945" stroke="#475569" stroke-width="2"/>
+    <rect x="488" y="943" width="304" height="32" rx="16" fill="url(#gGate)" filter="url(#shadow)"/>
+    <text x="640" y="963" text-anchor="middle" fill="#7C2D12" font-size="13" font-weight="700">⏸ Gate 3 · 剪辑思路 + 每轮 vN 反馈</text>
+    <line x1="640" y1="977" x2="640" y2="1007" stroke="#475569" stroke-width="2" marker-end="url(#arrowDark)"/>
+  </g>
+
+  <!-- ╭──────────────────────── Phase 4 · BGM ────────────────────────╮ -->
+  <g filter="url(#shadow)">
+    <rect x="380" y="1010" width="520" height="125" rx="22" fill="url(#g4)"/>
+    <rect x="380" y="1010" width="520" height="50" rx="22" fill="url(#cardOverlay)"/>
+    <circle cx="426" cy="1050" r="32" fill="#831843" filter="url(#glow)"/>
+    <text x="426" y="1061" text-anchor="middle" fill="#FCE7F3" font-size="26" font-weight="800">4</text>
+    <text x="478" y="1046" fill="#FDF2F8" font-size="20" font-weight="700">Phase 4 · BGMComposer</text>
+    <text x="478" y="1069" fill="#FBCFE8" font-size="13" font-weight="500" letter-spacing="0.04em">AGENT 4 · NUMPY BEAT + MUSICGEN + MUX</text>
+    <g font-size="11" font-weight="600">
+      <rect x="406" y="1091" width="135" height="24" rx="12" fill="#500724" opacity="0.7"/>
+      <text x="473.5" y="1108" text-anchor="middle" fill="#FBCFE8">M4a · scaffold</text>
+      <rect x="551" y="1091" width="170" height="24" rx="12" fill="#500724" opacity="0.7"/>
+      <text x="636" y="1108" text-anchor="middle" fill="#FBCFE8">M4b · MusicGen (CUDA)</text>
+      <rect x="731" y="1091" width="150" height="24" rx="12" fill="#500724" opacity="0.7"/>
+      <text x="806" y="1108" text-anchor="middle" fill="#FBCFE8">M4c · ffmpeg mux</text>
+    </g>
+  </g>
+
+  <!-- ⏸ Gate 4 -->
+  <g>
+    <line x1="640" y1="1135" x2="640" y2="1165" stroke="#475569" stroke-width="2"/>
+    <rect x="528" y="1163" width="224" height="32" rx="16" fill="url(#gGate)" filter="url(#shadow)"/>
+    <text x="640" y="1183" text-anchor="middle" fill="#7C2D12" font-size="13" font-weight="700">⏸ Gate 4 · 听 BGM 反馈</text>
+    <line x1="640" y1="1197" x2="640" y2="1227" stroke="#475569" stroke-width="2" marker-end="url(#arrowDark)"/>
+  </g>
+
+  <!-- ╭──────────────────────── Phase 5 · VoiceOver ────────────────────────╮ -->
+  <g filter="url(#shadow)">
+    <rect x="320" y="1230" width="640" height="155" rx="22" fill="url(#g5)"/>
+    <rect x="320" y="1230" width="640" height="50" rx="22" fill="url(#cardOverlay)"/>
+    <circle cx="366" cy="1270" r="32" fill="#064E3B" filter="url(#glow)"/>
+    <text x="366" y="1281" text-anchor="middle" fill="#D1FAE5" font-size="26" font-weight="800">5</text>
+    <text x="418" y="1266" fill="#ECFDF5" font-size="20" font-weight="700">Phase 5 · VoiceOver</text>
+    <text x="418" y="1289" fill="#A7F3D0" font-size="13" font-weight="500" letter-spacing="0.04em">AGENT 5 · LLM SCRIPT + EDGE-TTS + DUCKING</text>
+    <g font-size="11" font-weight="600">
+      <rect x="346" y="1311" width="135" height="24" rx="12" fill="#022C22" opacity="0.7"/>
+      <text x="413.5" y="1328" text-anchor="middle" fill="#A7F3D0">Step1 · script (LLM)</text>
+      <rect x="491" y="1311" width="125" height="24" rx="12" fill="#022C22" opacity="0.7"/>
+      <text x="553.5" y="1328" text-anchor="middle" fill="#A7F3D0">Step2 · edge-tts</text>
+      <rect x="626" y="1311" width="135" height="24" rx="12" fill="#022C22" opacity="0.7"/>
+      <text x="693.5" y="1328" text-anchor="middle" fill="#A7F3D0">Step3 · timeline</text>
+      <rect x="771" y="1311" width="160" height="24" rx="12" fill="#022C22" opacity="0.7"/>
+      <text x="851" y="1328" text-anchor="middle" fill="#A7F3D0">Step4 · ducking + mux</text>
+      <rect x="346" y="1343" width="585" height="24" rx="12" fill="#022C22" opacity="0.7"/>
+      <text x="638.5" y="1360" text-anchor="middle" fill="#A7F3D0">⏸ Gate 5 · 审脚本 (在 Step1 之后，Step2 之前)</text>
+    </g>
+  </g>
+
+  <!-- final arrow -->
+  <line x1="640" y1="1385" x2="640" y2="1428" stroke="#10B981" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <!-- ╭──────────────────────── Output ────────────────────────╮ -->
+  <g filter="url(#shadow)">
+    <rect x="380" y="1432" width="520" height="120" rx="24" fill="url(#gOutput)"/>
+    <text x="640" y="1474" text-anchor="middle" fill="#0F172A" font-size="22" font-weight="700">🎬  final_zh-CN.mp4 / final_en-US.mp4</text>
+    <text x="640" y="1502" text-anchor="middle" fill="#475569" font-size="13" font-weight="500" letter-spacing="0.05em">1920×1080 · 30FPS · H264 + AAC · BILINGUAL</text>
+    <g font-size="11" font-weight="600">
+      <rect x="450" y="1518" width="100" height="22" rx="11" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <text x="500" y="1534" text-anchor="middle" fill="#475569">25-35 sec</text>
+      <rect x="560" y="1518" width="80" height="22" rx="11" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <text x="600" y="1534" text-anchor="middle" fill="#475569">~3 MB</text>
+      <rect x="650" y="1518" width="180" height="22" rx="11" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <text x="740" y="1534" text-anchor="middle" fill="#475569">BGM + voiceover ducked</text>
+    </g>
+  </g>
+
+  <!-- ╭──────────────────────── Side legend (Observability) ────────────────────────╮ -->
+  <g transform="translate(40, 1432)">
+    <rect width="280" height="200" rx="16" fill="#1E293B" stroke="#334155" stroke-width="1"/>
+    <text x="20" y="32" fill="#F1F5F9" font-size="14" font-weight="700">Observability stack</text>
+    <text x="20" y="56" fill="#94A3B8" font-size="11" font-weight="500">events.jsonl + per-agent JSONL + Phoenix UI</text>
+
+    <g font-size="11" font-weight="600">
+      <circle cx="34" cy="86" r="5" fill="#6366F1"/>
+      <text x="48" y="90" fill="#E2E8F0">@traced_agent decorator</text>
+
+      <circle cx="34" cy="110" r="5" fill="#A855F7"/>
+      <text x="48" y="114" fill="#E2E8F0">agent_logger() per-agent JSONL</text>
+
+      <circle cx="34" cy="134" r="5" fill="#22D3EE"/>
+      <text x="48" y="138" fill="#E2E8F0">EventBus.emit asset_verified</text>
+
+      <circle cx="34" cy="158" r="5" fill="#F472B6"/>
+      <text x="48" y="162" fill="#E2E8F0">Phoenix OTEL spans (LLM call)</text>
+
+      <circle cx="34" cy="182" r="5" fill="#34D399"/>
+      <text x="48" y="186" fill="#E2E8F0">verify.* spans (ffprobe gate)</text>
+    </g>
+  </g>
+
+  <!-- ╭──────────────────────── Side legend (Tech) ────────────────────────╮ -->
+  <g transform="translate(960, 1432)">
+    <rect width="280" height="200" rx="16" fill="#1E293B" stroke="#334155" stroke-width="1"/>
+    <text x="20" y="32" fill="#F1F5F9" font-size="14" font-weight="700">Tech stack</text>
+    <text x="20" y="56" fill="#94A3B8" font-size="11" font-weight="500">Python · TypeScript · React · CUDA</text>
+
+    <g font-size="11" font-weight="600">
+      <text x="20" y="86" fill="#94A3B8">runtime</text>
+      <text x="100" y="86" fill="#E2E8F0">Anthropic SDK · 火山方舟</text>
+
+      <text x="20" y="110" fill="#94A3B8">visual</text>
+      <text x="100" y="110" fill="#E2E8F0">OpenDesign · HyperFrames</text>
+
+      <text x="20" y="134" fill="#94A3B8">edit</text>
+      <text x="100" y="134" fill="#E2E8F0">Remotion · ffmpeg</text>
+
+      <text x="20" y="158" fill="#94A3B8">audio</text>
+      <text x="100" y="158" fill="#E2E8F0">MusicGen · edge-tts</text>
+
+      <text x="20" y="182" fill="#94A3B8">UI</text>
+      <text x="100" y="182" fill="#E2E8F0">FastAPI + HTMX + SSE</text>
+    </g>
+  </g>
+
+  <!-- ╭──────────────────────── Footer ────────────────────────╮ -->
+  <text x="640" y="1660" text-anchor="middle" fill="#475569" font-size="11" font-weight="500" letter-spacing="0.05em">github.com/javana3/make_video  ·  Apache-2.0</text>
+</svg>
