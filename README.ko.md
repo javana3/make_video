@@ -22,7 +22,7 @@
 - **6 개 LLM 에이전트**: 페이즈마다 전용, 모두 Anthropic SDK 기반
 - **OpenDesign × HyperFrames**: 자연어 → 모션 그래픽 .mp4 (HTML+GSAP+프레임 캡처)
 - **이중언어 보이스오버**: edge-tts (중국어 + 영어) + ducking + amix
-- **풀스택 옵저버빌리티**: events.jsonl + 에이전트별 JSONL + Phoenix UI에서 LLM span
+- **풀스택 옵저버빌리티**: events.jsonl + 에이전트별 JSONL + Langfuse UI에서 LLM span
 - **휴먼 인 더 루프**: 5 개의 명시적 검토 게이트 — 사용자는 논의와 승인만, 코드는 작성하지 않음
 
 ---
@@ -169,7 +169,7 @@ opendesign/state.json               Agent 6 세션 상태
 opendesign_artifacts/               OpenDesign 아카이브 백업
 ```
 
-**Phoenix UI**: http://localhost:6006/ — 모든 LLM 호출 + verify span을 `~/.phoenix/` SQLite에 저장 (재부팅 후에도 유지).
+**Langfuse UI**: http://localhost:3000/ — 모든 LLM 호출 + traced_step span + verify 이벤트를 docker volumes (postgres + clickhouse + minio + redis) 에 저장 (재부팅 후에도 유지).
 
 각 에이전트 엔트리는 `@traced_agent("Agent N · 하위 단계", phase=N)`으로 데코레이트되며, 자동으로 `agent_start`/`agent_done` 이벤트 발행 + OTEL span 시작 — 5 페이즈 전체에 걸친 인과 체인 추적 가능.
 
@@ -181,7 +181,7 @@ opendesign_artifacts/               OpenDesign 아카이브 백업
 |---|---|
 | 에이전트 런타임 | Python 3.13 + Anthropic SDK + Volcengine Ark Coding Plan |
 | Web UI | FastAPI + Jinja2 + HTMX + SSE + Tailwind CSS |
-| 옵저버빌리티 | Phoenix (Arize) + loguru + OpenTelemetry |
+| 옵저버빌리티 | Langfuse (docker self-hosted) + loguru + OpenTelemetry |
 | 비주얼 합성 | OpenDesign daemon + OpenCode CLI + HyperFrames (HTML→MP4 + GSAP) |
 | 비디오 편집 | Remotion (React + TSX → mp4) |
 | BGM | numpy 비트 스캐폴드 + facebook/musicgen-small (PyTorch CUDA) |
@@ -200,7 +200,7 @@ src/
 │   ├── voice_over.py          Agent 5
 │   └── opendesigner.py        Agent 6
 ├── tools/                     에이전트별 헬퍼
-├── observability/             Phoenix tracing + loguru logging + EventBus
+├── observability/             Langfuse OTLP tracing + loguru logging + EventBus
 ├── verify/                    ffprobe 기반 산출물 검증
 ├── web/                       FastAPI + Jinja 템플릿
 ├── pipeline.py                Pipeline 클래스 + 상태 머신
@@ -215,7 +215,7 @@ src/
 - [remotion](https://github.com/remotion-dev/remotion) · React 기반 비디오 합성
 - [facebook/musicgen-small](https://huggingface.co/facebook/musicgen-small) · 텍스트 조건부 음악 생성
 - [edge-tts](https://github.com/rany2/edge-tts) · Microsoft Azure Neural TTS 래퍼
-- [Arize Phoenix](https://github.com/Arize-ai/phoenix) · LLM 옵저버빌리티
+- [Langfuse](https://github.com/langfuse/langfuse) · LLM 옵저버빌리티 (self-hosted)
 
 ---
 

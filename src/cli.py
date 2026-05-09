@@ -140,7 +140,7 @@ def cmd_analyze(args) -> int:
     project = args.project or repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
 
     pipe = Pipeline(project=project, run_id=args.run_id,
-                    launch_phoenix_ui=not args.no_phoenix)
+                    launch_observability_ui=not args.no_observability)
     pipe.transition(phase=1, gate="running")
 
     repo_dir = pipe.run_dir / "repo"
@@ -228,7 +228,8 @@ def main() -> int:
     pa.add_argument("--run-id", help="Existing run_id to resume")
     pa.add_argument("--mode", choices=["standard", "deep"], default="standard",
                     help="standard = README + key docs; deep = read source files too")
-    pa.add_argument("--no-phoenix", action="store_true", help="Skip launching Phoenix UI")
+    pa.add_argument("--no-observability", action="store_true",
+                    help="Skip OTLP tracing setup (Langfuse export)")
     pa.set_defaults(func=cmd_analyze)
 
     ps = sub.add_parser("serve", help="Launch the Web UI (FastAPI + HTMX)")

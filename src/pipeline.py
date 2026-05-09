@@ -27,7 +27,7 @@ class Pipeline:
                  project: str,
                  run_id: Optional[str] = None,
                  workspace_root: Optional[Path] = None,
-                 launch_phoenix_ui: bool = True):
+                 launch_observability_ui: bool = True):
         self.project = project
         self.run_id = run_id or uuid.uuid4().hex[:8]
         root = workspace_root or Path.cwd() / "workspace"
@@ -38,7 +38,7 @@ class Pipeline:
         self.state = self._load_or_init()
 
         setup_tracing(project_name=f"{project}-{self.run_id}",
-                      launch_ui=launch_phoenix_ui)
+                      launch_ui=launch_observability_ui)
         setup_logging(self.run_dir)
         self.bus = EventBus(self.run_dir, self.run_id)
         set_run_context(self.run_id, self.bus, self.run_dir)

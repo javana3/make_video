@@ -22,7 +22,7 @@
 - **6 LLM agents**: one per phase, all built on the Anthropic SDK
 - **OpenDesign × HyperFrames**: natural-language → motion-graphics .mp4 (HTML+GSAP+frame capture)
 - **Bilingual voiceover**: edge-tts (Chinese + English) + ducking + amix
-- **Full observability**: events.jsonl + per-agent JSONL + Phoenix UI for LLM spans
+- **Full observability**: events.jsonl + per-agent JSONL + Langfuse UI for LLM spans
 - **Human-in-the-loop**: 5 explicit review gates — the user discusses & approves; never writes code
 
 ---
@@ -169,7 +169,7 @@ opendesign/state.json               Agent 6 session state
 opendesign_artifacts/               OpenDesign archive backup
 ```
 
-**Phoenix UI**: http://localhost:6006/ — every LLM call + verify span, persisted to `~/.phoenix/` SQLite (survives reboots).
+**Langfuse UI**: http://localhost:3000/ — every LLM call + traced_step span + verify event, persisted to docker volumes (postgres + clickhouse + minio + redis), survives reboots.
 
 Each agent entrypoint is decorated with `@traced_agent("Agent N · sub-step", phase=N)`, which auto-emits `agent_start`/`agent_done` events and opens an OTEL span — full causal chain across all 5 phases.
 
@@ -181,7 +181,7 @@ Each agent entrypoint is decorated with `@traced_agent("Agent N · sub-step", ph
 |---|---|
 | Agent runtime | Python 3.13 + Anthropic SDK + Volcengine Ark Coding Plan |
 | Web UI | FastAPI + Jinja2 + HTMX + SSE + Tailwind CSS |
-| Observability | Phoenix (Arize) + loguru + OpenTelemetry |
+| Observability | Langfuse (self-hosted via docker) + loguru + OpenTelemetry |
 | Visual composition | OpenDesign daemon + OpenCode CLI + HyperFrames (HTML→MP4 + GSAP) |
 | Video editing | Remotion (React + TSX → mp4) |
 | BGM | numpy beat scaffold + facebook/musicgen-small (PyTorch CUDA) |
@@ -200,7 +200,7 @@ src/
 │   ├── voice_over.py          Agent 5
 │   └── opendesigner.py        Agent 6
 ├── tools/                     per-agent helpers (bgm_*, voice_*, opendesign_*, recorder, etc.)
-├── observability/             Phoenix tracing + loguru logging + EventBus
+├── observability/             Langfuse OTLP tracing + loguru logging + EventBus
 ├── verify/                    ffprobe-based artifact verification
 ├── web/                       FastAPI + Jinja templates
 ├── pipeline.py                Pipeline class + state machine
@@ -215,7 +215,7 @@ src/
 - [remotion](https://github.com/remotion-dev/remotion) · React-based video composition
 - [facebook/musicgen-small](https://huggingface.co/facebook/musicgen-small) · Text-conditioned music generation
 - [edge-tts](https://github.com/rany2/edge-tts) · Microsoft Azure Neural TTS wrapper
-- [Arize Phoenix](https://github.com/Arize-ai/phoenix) · LLM observability
+- [Langfuse](https://github.com/langfuse/langfuse) · LLM observability (self-hosted)
 
 ---
 

@@ -2,7 +2,7 @@
 
 Every state transition / artifact verification / user input must emit a
 PipelineEvent here. Events are appended to events.jsonl AND attached as
-events on the current OTEL span (visible in Phoenix UI).
+events on the current OTEL span (visible in Langfuse UI).
 """
 from __future__ import annotations
 

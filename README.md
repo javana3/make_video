@@ -22,7 +22,7 @@
 - **6 个 LLM Agent**：每个阶段一个独立 Agent，基于 Anthropic SDK
 - **OpenDesign × HyperFrames**：自然语言 → motion graphics .mp4（HTML+GSAP+帧捕获）
 - **双语配音**：edge-tts 中英 voiceover + ducking + amix
-- **全链路 Observability**：events.jsonl + 每 agent 独立 JSONL + Phoenix UI 看 LLM span
+- **全链路 Observability**：events.jsonl + 每 agent 独立 JSONL + Langfuse UI 看 LLM span
 - **人在回路**：5 个人工拍板节点，user 只讨论 + 审阅，不写代码
 
 ---
@@ -169,7 +169,7 @@ opendesign/state.json               Agent 6 session 状态
 opendesign_artifacts/               OpenDesign archive 备份
 ```
 
-**Phoenix UI**: http://localhost:6006/ — 全部 LLM call + verify span 持久化（SQLite at `~/.phoenix/`）
+**Langfuse UI**: http://localhost:3000/ — 全部 LLM call + verify span + traced_step 嵌套，持久化在 docker volumes 里（postgres + clickhouse + minio + redis）
 
 每个 Agent 入口都用 `@traced_agent("Agent N · 子步骤", phase=N)` 装饰，自动 emit `agent_start` / `agent_done` 事件 + 创建 OTEL span，全链路追溯。
 
@@ -181,7 +181,7 @@ opendesign_artifacts/               OpenDesign archive 备份
 |---|---|
 | Agent runtime | Python 3.13 + Anthropic SDK + 火山方舟 Coding Plan |
 | Web UI | FastAPI + Jinja2 + HTMX + SSE + Tailwind CSS |
-| Observability | Phoenix (Arize) + loguru + OTEL |
+| Observability | Langfuse (self-hosted via docker) + loguru + OTEL |
 | 视觉合成 | OpenDesign daemon + OpenCode CLI + HyperFrames (HTML→MP4 + GSAP) |
 | 视频剪辑 | Remotion (React + TSX → mp4) |
 | BGM | numpy 节拍脚手架 + facebook/musicgen-small (PyTorch CUDA) |
@@ -214,7 +214,7 @@ src/
 │   ├── remotion_codegen.py    Agent 3 cutting_plan → TSX
 │   └── remotion_render.py     Agent 3 npx remotion render
 ├── observability/
-│   ├── tracer.py              Phoenix OTEL setup
+│   ├── tracer.py              Langfuse OTLP HTTP exporter setup
 │   ├── logger.py              loguru + per-agent JSONL
 │   ├── audit.py               @traced_agent decorator + run_context
 │   └── events.py              EventBus (events.jsonl)
@@ -232,7 +232,7 @@ src/
 - [remotion](https://github.com/remotion-dev/remotion) · React-based 视频合成
 - [facebook/musicgen-small](https://huggingface.co/facebook/musicgen-small) · 文本驱动音乐生成
 - [edge-tts](https://github.com/rany2/edge-tts) · Microsoft Azure Neural TTS 包装
-- [Arize Phoenix](https://github.com/Arize-ai/phoenix) · LLM observability
+- [Langfuse](https://github.com/langfuse/langfuse) · LLM observability (self-hosted)
 
 ---
 

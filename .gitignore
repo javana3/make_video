@@ -17,14 +17,18 @@ workspace/
 .idea/
 .claude/
 
-# Phoenix
-.phoenix/
+# Langfuse (volumes are in docker, not in repo)
+.langfuse/
 
 # Node (in case Remotion projects spill module dirs into root)
 node_modules/
 
 # Logs
 *.log
+.logs/
+
+# Local smoke / e2e harnesses (not part of the project's test suite)
+/e2e_*.py
 
 # OS
 Thumbs.db

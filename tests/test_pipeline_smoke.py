@@ -30,7 +30,7 @@ def main() -> int:
 
     # 1. init
     pipe = Pipeline(project=project, run_id=run_id, workspace_root=workspace,
-                    launch_phoenix_ui=False)  # don't start UI in test
+                    launch_observability_ui=False)  # don't start UI in test
     assert pipe.state.phase == 1
     assert pipe.state.gate == "running"
     print(f"[1/5] init OK            run_dir = {pipe.run_dir}")
@@ -64,7 +64,7 @@ def main() -> int:
 
     # 5. reload from state.json
     pipe2 = Pipeline(project=project, run_id=run_id, workspace_root=workspace,
-                     launch_phoenix_ui=False)
+                     launch_observability_ui=False)
     assert pipe2.state.phase == 2
     assert pipe2.state.gate == "waiting_html"
     assert "recording_v0" in pipe2.state.manifest

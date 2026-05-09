@@ -1,9 +1,9 @@
 """M-1 smoke test.
 
 Verifies the observability stack wires up end-to-end:
-  1. Phoenix UI launches and instruments Anthropic SDK
+  1. Langfuse OTLP exporter set up + instruments Anthropic SDK
   2. loguru sinks console + JSONL
-  3. EventBus writes events.jsonl + Phoenix span events
+  3. EventBus writes events.jsonl + Langfuse span events
   4. @traced_agent wraps an Agent function in a span
   5. tools.shell.run() captures output + logs
 
@@ -27,7 +27,7 @@ except Exception:
 # allow running as a script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.observability.tracer import setup, phoenix_url
+from src.observability.tracer import setup, langfuse_url
 from src.observability.logger import setup_logging, agent_logger
 from src.observability.events import EventBus
 from src.observability.audit import traced_agent, set_run_context
@@ -46,7 +46,7 @@ def main(keep_alive: bool = False) -> int:
 
     # 1. Tracing
     setup(project_name="smoke-test", launch_ui=True)
-    print(f"[1/5] tracing OK   — Phoenix at {phoenix_url()}")
+    print(f"[1/5] tracing OK   — Langfuse at {langfuse_url()}")
 
     # 2. Logging
     setup_logging(run_dir)
@@ -107,10 +107,10 @@ def main(keep_alive: bool = False) -> int:
     print(f"  agent log:     {smoke_log}  ({smoke_log.stat().st_size} B)")
 
     print(f"\n✅ M-1 smoke test passed")
-    print(f"   Phoenix UI: {phoenix_url()}")
+    print(f"   Langfuse UI: {langfuse_url()}")
 
     if keep_alive:
-        print(f"\nPress Enter to exit (Phoenix UI will stop)...")
+        print(f"\nPress Enter to exit (webserver will exit)...")
         try:
             input()
         except (EOFError, KeyboardInterrupt):

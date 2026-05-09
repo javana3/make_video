@@ -22,7 +22,7 @@
 - **6 つの LLM エージェント**: 各フェーズ専用、Anthropic SDK ベース
 - **OpenDesign × HyperFrames**: 自然言語 → モーショングラフィックス .mp4（HTML+GSAP+フレームキャプチャ）
 - **バイリンガル音声**: edge-tts（中国語＋英語）+ ducking + amix
-- **完全な可観測性**: events.jsonl + エージェント別 JSONL + Phoenix UI で LLM スパン
+- **完全な可観測性**: events.jsonl + エージェント別 JSONL + Langfuse UI で LLM スパン
 - **ヒューマン・イン・ザ・ループ**: 5 つの明示的な承認ゲート — ユーザーは議論と承認のみ、コードは書かない
 
 ---
@@ -169,7 +169,7 @@ opendesign/state.json               Agent 6 セッション状態
 opendesign_artifacts/               OpenDesign アーカイブのバックアップ
 ```
 
-**Phoenix UI**: http://localhost:6006/ — 全 LLM 呼び出し + verify スパンを `~/.phoenix/` SQLite に保存（再起動しても残る）。
+**Langfuse UI**: http://localhost:3000/ — 全 LLM 呼び出し + traced_step スパン + verify イベントを docker volumes（postgres + clickhouse + minio + redis）に保存（再起動しても残る）。
 
 各エージェントエントリは `@traced_agent("Agent N · サブステップ", phase=N)` で装飾され、`agent_start`/`agent_done` イベントを自動発行し OTEL スパンを開始 — 5 フェーズ全体の因果連鎖が完全に追跡可能。
 
@@ -181,7 +181,7 @@ opendesign_artifacts/               OpenDesign アーカイブのバックアッ
 |---|---|
 | エージェントランタイム | Python 3.13 + Anthropic SDK + Volcengine Ark Coding Plan |
 | Web UI | FastAPI + Jinja2 + HTMX + SSE + Tailwind CSS |
-| 可観測性 | Phoenix (Arize) + loguru + OpenTelemetry |
+| 可観測性 | Langfuse（docker self-hosted）+ loguru + OpenTelemetry |
 | ビジュアル合成 | OpenDesign daemon + OpenCode CLI + HyperFrames (HTML→MP4 + GSAP) |
 | 動画編集 | Remotion (React + TSX → mp4) |
 | BGM | numpy ビートスキャフォールド + facebook/musicgen-small (PyTorch CUDA) |
@@ -200,7 +200,7 @@ src/
 │   ├── voice_over.py          Agent 5
 │   └── opendesigner.py        Agent 6
 ├── tools/                     エージェント別ヘルパー
-├── observability/             Phoenix tracing + loguru logging + EventBus
+├── observability/             Langfuse OTLP tracing + loguru logging + EventBus
 ├── verify/                    ffprobe ベースの成果物検証
 ├── web/                       FastAPI + Jinja テンプレート
 ├── pipeline.py                Pipeline クラス + ステートマシン
@@ -215,7 +215,7 @@ src/
 - [remotion](https://github.com/remotion-dev/remotion) · React ベースの動画合成
 - [facebook/musicgen-small](https://huggingface.co/facebook/musicgen-small) · テキスト条件付き音楽生成
 - [edge-tts](https://github.com/rany2/edge-tts) · Microsoft Azure Neural TTS ラッパー
-- [Arize Phoenix](https://github.com/Arize-ai/phoenix) · LLM 可観測性
+- [Langfuse](https://github.com/langfuse/langfuse) · LLM 可観測性（self-hosted）
 
 ---
 
