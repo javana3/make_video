@@ -966,6 +966,15 @@ def _events_summary(events: list[dict]) -> dict:
     }
 
 
+@app.get("/runs/{project}/{run_id}/trace")
+@app.get("/runs/{project}/{run_id}/logs")
+@app.get("/runs/{project}/{run_id}/traces")
+async def observability_alias(project: str, run_id: str):
+    """Convenience aliases — redirect to /observability."""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=f"/runs/{project}/{run_id}/observability", status_code=302)
+
+
 @app.get("/runs/{project}/{run_id}/observability", response_class=HTMLResponse)
 async def observability_page(project: str, run_id: str, request: Request):
     pipe = REGISTRY.get_or_load(project, run_id)

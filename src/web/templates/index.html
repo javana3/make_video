@@ -104,35 +104,46 @@
   {% if runs %}
   <div class="grid gap-3">
     {% for r in runs %}
-    <a href="/runs/{{ r.project }}/{{ r.run_id }}"
-       class="group block rounded-xl border border-slate-800 hover:border-emerald-500/50 bg-slate-900/40 hover:bg-slate-900 px-5 py-4 transition">
-      <div class="flex items-start justify-between gap-4">
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-3 mb-1">
-            <span class="text-base font-semibold text-slate-100 group-hover:text-emerald-400 transition">
-              {{ r.project }}
-            </span>
-            <span class="font-mono text-xs px-2 py-0.5 bg-slate-800 rounded text-slate-400">
-              {{ r.run_id }}
-            </span>
+    <div class="group rounded-xl border border-slate-800 hover:border-emerald-500/50 bg-slate-900/40 hover:bg-slate-900 transition">
+      <a href="/runs/{{ r.project }}/{{ r.run_id }}" class="block px-5 py-4">
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-3 mb-1">
+              <span class="text-base font-semibold text-slate-100 group-hover:text-emerald-400 transition">
+                {{ r.project }}
+              </span>
+              <span class="font-mono text-xs px-2 py-0.5 bg-slate-800 rounded text-slate-400">
+                {{ r.run_id }}
+              </span>
+            </div>
+            <div class="flex items-center gap-4 text-xs text-slate-500">
+              <span>Phase <span class="text-slate-300 font-medium">{{ r.phase }}/5</span></span>
+              <span>Gate: <span class="font-mono text-slate-300">{{ r.gate }}</span></span>
+              <span>{{ r.manifest_count }} artifact(s)</span>
+            </div>
           </div>
-          <div class="flex items-center gap-4 text-xs text-slate-500">
-            <span>Phase <span class="text-slate-300 font-medium">{{ r.phase }}/5</span></span>
-            <span>Gate: <span class="font-mono text-slate-300">{{ r.gate }}</span></span>
-            <span>{{ r.manifest_count }} artifact(s)</span>
+          <div class="flex flex-col items-end gap-1">
+            {% if r.gate == 'done' %}
+              <span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">done</span>
+            {% elif r.gate.startswith('waiting_') %}
+              <span class="px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-300 border border-amber-500/40">waiting</span>
+            {% else %}
+              <span class="px-2 py-0.5 rounded text-xs bg-sky-500/20 text-sky-300 border border-sky-500/40">running</span>
+            {% endif %}
           </div>
         </div>
-        <div class="flex flex-col items-end gap-1">
-          {% if r.gate == 'done' %}
-            <span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">done</span>
-          {% elif r.gate.startswith('waiting_') %}
-            <span class="px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-300 border border-amber-500/40">waiting</span>
-          {% else %}
-            <span class="px-2 py-0.5 rounded text-xs bg-sky-500/20 text-sky-300 border border-sky-500/40">running</span>
-          {% endif %}
-        </div>
+      </a>
+      <div class="flex gap-2 px-5 pb-3 -mt-1">
+        <a href="/runs/{{ r.project }}/{{ r.run_id }}/observability"
+           class="text-xs px-2 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-emerald-300 rounded transition">
+          📊 Trace
+        </a>
+        <a href="/runs/{{ r.project }}/{{ r.run_id }}/opendesign"
+           class="text-xs px-2 py-1 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 text-purple-300 rounded transition">
+          🎨 OpenDesign
+        </a>
       </div>
-    </a>
+    </div>
     {% endfor %}
   </div>
   {% else %}
