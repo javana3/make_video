@@ -890,6 +890,156 @@ async def status_chip(project: str, run_id: str):
 
 
 # ────────────────────────────────────────────────────────────
+# Observability viewer · /runs/{project}/{run_id}/observability
+# ────────────────────────────────────────────────────────────
+
+def _read_events(run_dir: Path, limit: int = 500) -> list[dict]:
+    """Read events.jsonl, return last `limit` parsed entries."""
+    p = run_dir / "events.jsonl"
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    except Exception:
+        return []
+    return out[-limit:]
+
+
+def _summarize_logs(run_dir: Path) -> list[dict]:
+    """Inventory of logs/*.jsonl: name, lines, size_bytes, last_line."""
+    log_dir = run_dir / "logs"
+    if not log_dir.exists():
+        return []
+    items: list[dict] = []
+    for f in sorted(log_dir.glob("*.jsonl")):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+            lines = [l for l in text.splitlines() if l.strip()]
+            n = len(lines)
+            last = lines[-1] if lines else ""
+            # Try to extract human-readable message from last loguru-serialize line
+            preview = ""
+            try:
+                rec = json.loads(last)
+                preview = (rec.get("record", {}).get("message") or rec.get("text") or last)[:200]
+            except Exception:
+                preview = last[:200]
+            items.append({
+                "name": f.name,
+                "lines": n,
+                "size_bytes": f.stat().st_size,
+                "preview": preview,
+            })
+        except Exception:
+            pass
+    return items
+
+
+def _events_summary(events: list[dict]) -> dict:
+    """Count by event type + collect unique agent names."""
+    by_type: dict = {}
+    by_agent: dict = {}
+    asset_count = 0
+    error_count = 0
+    for e in events:
+        etype = e.get("event", "?")
+        by_type[etype] = by_type.get(etype, 0) + 1
+        agent = e.get("agent") or "(none)"
+        by_agent[agent] = by_agent.get(agent, 0) + 1
+        if etype == "asset_verified":
+            asset_count += 1
+        if etype == "asset_failed":
+            error_count += 1
+    return {
+        "total": len(events),
+        "by_type": by_type,
+        "by_agent": by_agent,
+        "asset_verified": asset_count,
+        "asset_failed": error_count,
+    }
+
+
+@app.get("/runs/{project}/{run_id}/observability", response_class=HTMLResponse)
+async def observability_page(project: str, run_id: str, request: Request):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    events = _read_events(pipe.run_dir)
+    summary = _events_summary(events)
+    log_files = _summarize_logs(pipe.run_dir)
+    return TEMPLATES.TemplateResponse(request, "observability.html", {
+        "project": project, "run_id": run_id,
+        "events": events,
+        "summary": summary,
+        "log_files": log_files,
+        "phoenix_url": "http://localhost:6006/",
+    })
+
+
+@app.get("/runs/{project}/{run_id}/observability/log/{name}")
+async def observability_log_view(project: str, run_id: str, name: str,
+                                   tail: int = 200):
+    """Stream last `tail` lines of a specific JSONL log (raw text)."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    p = (pipe.run_dir / "logs" / name).resolve()
+    base = (pipe.run_dir / "logs").resolve()
+    if base != p.parent:
+        raise HTTPException(403, "path traversal")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404)
+    try:
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    body_lines: list[str] = []
+    for raw in lines[-tail:]:
+        if not raw.strip():
+            continue
+        try:
+            rec = json.loads(raw)
+            r = rec.get("record", {})
+            ts = r.get("time", {}).get("repr", "") or rec.get("time", "")
+            level = r.get("level", {}).get("name", "?") or rec.get("level", "")
+            msg = r.get("message", "") or rec.get("message", "") or rec.get("text", raw)
+            extra = r.get("extra", {})
+            agent = extra.get("agent", "") or rec.get("agent", "")
+            body_lines.append(f"{ts}  {level:<7}  {agent:<25}  {msg}")
+        except Exception:
+            body_lines.append(raw)
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("\n".join(body_lines))
+
+
+@app.get("/runs/{project}/{run_id}/observability/events_stream")
+async def observability_events_stream(project: str, run_id: str):
+    """SSE stream — pushes 'observability_changed' event when events.jsonl mtime changes."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    events_path = pipe.run_dir / "events.jsonl"
+
+    async def gen():
+        last_mtime: float = -1.0
+        last_size: int = -1
+        while True:
+            try:
+                if events_path.exists():
+                    st = events_path.stat()
+                    if st.st_mtime != last_mtime or st.st_size != last_size:
+                        last_mtime = st.st_mtime
+                        last_size = st.st_size
+                        yield f"event: observability_changed\ndata: {{\"size\": {st.st_size}}}\n\n"
+            except Exception:
+                pass
+            await asyncio.sleep(2.0)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# ────────────────────────────────────────────────────────────
 # Phase 2B · Smart Demo (LLM plan → playwright record → captions)
 # ────────────────────────────────────────────────────────────
 
