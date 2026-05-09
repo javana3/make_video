@@ -90,6 +90,12 @@
       {% include "_phase_1.html" %}
     {% elif state.phase == 2 %}
       {% include "_phase_2.html" %}
+    {% elif state.phase == 3 %}
+      {% include "_phase_3.html" %}
+    {% elif state.phase == 4 %}
+      {% include "_phase_4.html" %}
+    {% elif state.phase == 5 %}
+      {% include "_phase_5.html" %}
     {% else %}
       <div class="rounded-lg border border-slate-800 bg-slate-900/50 px-6 py-12 text-center text-slate-400">
         Phase {{ state.phase }} UI not implemented yet.

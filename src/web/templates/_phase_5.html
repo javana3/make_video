@@ -1,0 +1,65 @@
+<!-- Phase 5 · VoiceOver: script + edge-tts + timeline + ducking → outputs/final_<lang>.mp4 -->
+{% set final_zh_exists = phase5_state.final_zh_exists %}
+{% set final_en_exists = phase5_state.final_en_exists %}
+{% set is_running = phase5_state.is_running %}
+
+<div class="rounded-lg border border-emerald-700/40 bg-emerald-950/15 px-5 py-5 space-y-3">
+  <div class="flex items-center gap-2">
+    <span class="text-base font-semibold text-emerald-200">🗣️ Phase 5 · VoiceOver</span>
+    <span class="text-xs text-slate-500">LLM script + edge-tts + ducking → final.mp4</span>
+  </div>
+
+  {% if not final_zh_exists and not final_en_exists %}
+  <p class="text-sm text-slate-400">
+    Step1 LLM 写中英 voiceover_script.json → Step2 edge-tts 逐句合成 → Step3 voice_full.wav 拼合 → Step4 BGM ducking + amix。
+    <span class="text-slate-500">~30-60s</span>
+  </p>
+  <div class="flex gap-2 flex-wrap">
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result" hx-swap="innerHTML">
+      <input type="hidden" name="lang" value="zh-CN"/>
+      <button type="submit" {% if is_running %}disabled{% endif %}
+              class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm rounded font-semibold disabled:opacity-50">
+        🗣️ 跑 Phase 5（中文）
+      </button>
+    </form>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result" hx-swap="innerHTML">
+      <input type="hidden" name="lang" value="en-US"/>
+      <button type="submit" {% if is_running %}disabled{% endif %}
+              class="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white text-sm rounded font-semibold disabled:opacity-50">
+        🗣️ Phase 5 (English)
+      </button>
+    </form>
+    {% if is_running %}<span class="text-xs text-emerald-300 self-center">⏳ 正在跑...</span>{% endif %}
+  </div>
+  {% else %}
+  <div class="text-sm text-slate-300">✅ Final video 完成</div>
+  {% if final_zh_exists %}
+  <div>
+    <div class="text-xs text-slate-500 mb-1">final_zh-CN.mp4 · {{ phase5_state.zh_size_mb }} MB</div>
+    <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/final_zh-CN.mp4"
+           controls class="w-full max-h-[50vh] rounded border border-slate-700 bg-black"></video>
+  </div>
+  {% endif %}
+  {% if final_en_exists %}
+  <div>
+    <div class="text-xs text-slate-500 mb-1">final_en-US.mp4 · {{ phase5_state.en_size_mb }} MB</div>
+    <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/final_en-US.mp4"
+           controls class="w-full max-h-[50vh] rounded border border-slate-700 bg-black"></video>
+  </div>
+  {% endif %}
+  <div class="flex gap-2 flex-wrap">
+    {% if not final_zh_exists %}
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result">
+      <input type="hidden" name="lang" value="zh-CN"/>
+      <button type="submit" class="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 text-white text-sm rounded">+ 中文版</button>
+    </form>
+    {% endif %}
+    {% if not final_en_exists %}
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result">
+      <input type="hidden" name="lang" value="en-US"/>
+      <button type="submit" class="px-3 py-2 bg-sky-700 hover:bg-sky-600 text-white text-sm rounded">+ English</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

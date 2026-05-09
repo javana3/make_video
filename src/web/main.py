@@ -318,6 +318,31 @@ async def view_run(project: str, run_id: str, request: Request):
         briefs_dir = pipe.run_dir / "briefs"
         phase_ctx["versions"] = _load_brief_versions(briefs_dir)
 
+    # Phase 3/4/5 status (file existence + sizes)
+    out_dir = pipe.run_dir / "outputs"
+    v1 = out_dir / "v1.mp4"
+    v1_bgm = out_dir / "v1_bgm_final.mp4"
+    final_zh = out_dir / "final_zh-CN.mp4"
+    final_en = out_dir / "final_en-US.mp4"
+    is_running = REGISTRY.is_running(run_id)
+    phase3_state = {
+        "v1_exists": v1.exists(),
+        "v1_size_mb": round(v1.stat().st_size / 1024 / 1024, 2) if v1.exists() else 0,
+        "is_running": is_running,
+    }
+    phase4_state = {
+        "v1_bgm_exists": v1_bgm.exists(),
+        "v1bgm_size_mb": round(v1_bgm.stat().st_size / 1024 / 1024, 2) if v1_bgm.exists() else 0,
+        "is_running": is_running,
+    }
+    phase5_state = {
+        "final_zh_exists": final_zh.exists(),
+        "final_en_exists": final_en.exists(),
+        "zh_size_mb": round(final_zh.stat().st_size / 1024 / 1024, 2) if final_zh.exists() else 0,
+        "en_size_mb": round(final_en.stat().st_size / 1024 / 1024, 2) if final_en.exists() else 0,
+        "is_running": is_running,
+    }
+
     return TEMPLATES.TemplateResponse(request, "run.html", {
         "project": project,
         "run_id": run_id,
@@ -326,6 +351,10 @@ async def view_run(project: str, run_id: str, request: Request):
         "phase_label": _phase_label(state.phase),
         "phoenix_url": "http://localhost:6006",
         "agent_running": REGISTRY.is_running(run_id),
+        "run_dir": str(pipe.run_dir),
+        "phase3_state": phase3_state,
+        "phase4_state": phase4_state,
+        "phase5_state": phase5_state,
     })
 
 
@@ -733,9 +762,11 @@ async def accept_test(project: str, run_id: str):
     )
     pipe.bus.emit("user_input", agent="pipeline", action="accept_test_recording",
                   window_title=accepted["window_title"])
+    pipe.record_asset("recording_test", rec_dir / "test.mp4", verified=True, source="window_record")
+    pipe.transition(phase=3, gate="running")
     return HTMLResponse(
         '<div class="px-4 py-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 rounded">'
-        '✅ 窗口已接受。下一步：M2c 正式录屏（待实现）'
+        '✅ 录屏已接受 → Phase 3'
         '</div>',
         headers=_PHASE2_REFRESH,
     )
@@ -1250,6 +1281,7 @@ async def accept_demo_route(project: str, run_id: str,
         pipe.bus.emit("asset_verified", agent="pipeline",
                       name="recording_test", path=str(target),
                       captions=with_captions)
+        pipe.transition(phase=3, gate="running")
     except Exception as e:
         pipe.log.exception(f"accept_demo failed: {e}")
         return HTMLResponse(
@@ -1266,6 +1298,233 @@ async def accept_demo_route(project: str, run_id: str,
 # ────────────────────────────────────────────────────────────
 # Phase 2B · CLI/TUI Terminal Recorder (for non-web projects)
 # ────────────────────────────────────────────────────────────
+
+# ────────────────────────────────────────────────────────────
+# Phase 3 · Remotion (cutting_plan + codegen + render)
+# ────────────────────────────────────────────────────────────
+
+@app.post("/runs/{project}/{run_id}/run_phase3", response_class=HTMLResponse)
+async def run_phase3_route(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    asyncio.create_task(_run_phase3_async(pipe))
+    return HTMLResponse('<div class="text-amber-300 text-sm py-2">⏳ Phase 3 · cutting_plan + Remotion render（5-10min）...</div>',
+                          headers={"HX-Trigger": "phase3-refresh"})
+
+
+async def _run_phase3_async(pipe: Pipeline) -> None:
+    await REGISTRY.mark_running(pipe.run_id, "phase3")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..agents.remotion_composer import run_cutting_planner
+        from ..tools.remotion_codegen import generate_project
+        from ..tools.remotion_render import npm_install, render
+        from ..tools.shell import run as shell_run
+        from ..tools.ffbin import ffprobe
+
+        run_dir = pipe.run_dir
+        recording = run_dir / "recordings" / "test.mp4"
+        if not recording.exists():
+            raise RuntimeError("recordings/test.mp4 missing — Phase 2 not done")
+        brief = (run_dir / "project_brief.md").read_text(encoding="utf-8")
+
+        # Probe recording
+        probe = await asyncio.to_thread(shell_run, [
+            ffprobe(), "-v", "quiet", "-print_format", "json",
+            "-show_streams", "-show_format", str(recording),
+        ], check=True)
+        data = json.loads(probe.stdout)
+        v = next(s for s in data["streams"] if s["codec_type"] == "video")
+        recording_meta = {
+            "source_path": "recordings/test.mp4",
+            "duration_s": float(data["format"]["duration"]),
+            "width": int(v["width"]), "height": int(v["height"]),
+            "codec": v["codec_name"], "fps": v["r_frame_rate"],
+        }
+
+        # M3a · cutting plan
+        plan_path = run_dir / "cutting_plan.json"
+        await asyncio.to_thread(
+            run_cutting_planner,
+            run_dir=run_dir, project_brief=brief,
+            recording_meta=recording_meta, output_path=plan_path,
+            progress_path=run_dir / "progress.json",
+        )
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+
+        # M3b · codegen
+        num, den = recording_meta["fps"].split("/")
+        src_fps = max(1, round(int(num) / int(den)))
+        remotion_dir = run_dir / "remotion"
+        await asyncio.to_thread(generate_project, plan, remotion_dir, recording, src_fps=src_fps)
+
+        # M3b · npm install (skipped if package-lock.json + node_modules exist)
+        if not (remotion_dir / "node_modules").exists():
+            await asyncio.to_thread(npm_install, remotion_dir, timeout=600)
+
+        # M3b · render
+        out = run_dir / "outputs" / "v1.mp4"
+        await asyncio.to_thread(render, remotion_dir, output_path=out, timeout=900)
+
+        pipe.record_asset("v1_video", out, verified=True)
+        pipe.transition(phase=3, gate="waiting_v1_review")
+    except Exception as e:
+        pipe.log.exception(f"phase3 failed: {e}")
+        pipe.bus.emit("asset_failed", agent="phase3", error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+@app.post("/runs/{project}/{run_id}/accept_phase3", response_class=HTMLResponse)
+async def accept_phase3(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    pipe.transition(phase=4, gate="running")
+    return HTMLResponse('<div class="text-emerald-400 text-sm">✅ Phase 3 通过 → Phase 4</div>',
+                          headers={"HX-Trigger": "phase-refresh"})
+
+
+# ────────────────────────────────────────────────────────────
+# Phase 4 · BGM (scaffold + musicgen + mux)
+# ────────────────────────────────────────────────────────────
+
+@app.post("/runs/{project}/{run_id}/run_phase4", response_class=HTMLResponse)
+async def run_phase4_route(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    asyncio.create_task(_run_phase4_async(pipe))
+    return HTMLResponse('<div class="text-amber-300 text-sm py-2">⏳ Phase 4 · BGM scaffold + MusicGen + mux...</div>',
+                          headers={"HX-Trigger": "phase4-refresh"})
+
+
+async def _run_phase4_async(pipe: Pipeline) -> None:
+    await REGISTRY.mark_running(pipe.run_id, "phase4")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        from ..tools.bgm_scaffold import generate_scaffold
+        from ..tools.bgm_musicgen import generate_bgm, build_prompt_from_brief
+        from ..tools.bgm_mux import mux_bgm
+        import tempfile
+
+        run_dir = pipe.run_dir
+        plan = json.loads((run_dir / "cutting_plan.json").read_text(encoding="utf-8"))
+        brief = (run_dir / "project_brief.md").read_text(encoding="utf-8")
+
+        # M4a · scaffold
+        scaffold = run_dir / "bgm" / "bgm_scaffold.wav"
+        r1 = await asyncio.to_thread(generate_scaffold, plan, scaffold, 120)
+
+        # M4b · MusicGen (use local model dir to bypass HF cache issues)
+        local_model = str(Path(tempfile.gettempdir()) / "musicgen-small-local")
+        if Path(local_model).exists():
+            model_arg = local_model
+        else:
+            model_arg = "facebook/musicgen-small"
+        bgm_final = run_dir / "bgm" / "bgm_final.wav"
+        prompt = build_prompt_from_brief(brief, bpm=120)
+        await asyncio.to_thread(
+            generate_bgm,
+            scaffold, bgm_final, prompt,
+            r1["duration_s"], model_arg, None, False,
+        )
+
+        # M4c · mux
+        v1 = run_dir / "outputs" / "v1.mp4"
+        v1_bgm = run_dir / "outputs" / "v1_bgm_final.mp4"
+        await asyncio.to_thread(mux_bgm, v1, bgm_final, v1_bgm, 0.7)
+
+        pipe.record_asset("v1_bgm_final", v1_bgm, verified=True)
+        pipe.transition(phase=4, gate="waiting_bgm_review")
+    except Exception as e:
+        pipe.log.exception(f"phase4 failed: {e}")
+        pipe.bus.emit("asset_failed", agent="phase4", error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
+
+@app.post("/runs/{project}/{run_id}/accept_phase4", response_class=HTMLResponse)
+async def accept_phase4(project: str, run_id: str):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    pipe.transition(phase=5, gate="running")
+    return HTMLResponse('<div class="text-emerald-400 text-sm">✅ Phase 4 通过 → Phase 5</div>',
+                          headers={"HX-Trigger": "phase-refresh"})
+
+
+# ────────────────────────────────────────────────────────────
+# Phase 5 · VoiceOver (script + tts + timeline + ducking)
+# ────────────────────────────────────────────────────────────
+
+@app.post("/runs/{project}/{run_id}/run_phase5", response_class=HTMLResponse)
+async def run_phase5_route(project: str, run_id: str, lang: str = Form("zh-CN")):
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    asyncio.create_task(_run_phase5_async(pipe, lang))
+    return HTMLResponse(f'<div class="text-amber-300 text-sm py-2">⏳ Phase 5 · script + edge-tts + ducking ({lang})...</div>',
+                          headers={"HX-Trigger": "phase5-refresh"})
+
+
+async def _run_phase5_async(pipe: Pipeline, lang: str = "zh-CN") -> None:
+    await REGISTRY.mark_running(pipe.run_id, "phase5")
+    try:
+        set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+        # Strip system proxies so edge-tts wss isn't intercepted by VPN MITM
+        import os
+        for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy","ALL_PROXY","all_proxy"):
+            os.environ.pop(k, None)
+        os.environ["NO_PROXY"] = "*"
+
+        from ..agents.voice_over import propose_script
+        from ..tools.tts_edge import synth_script
+        from ..tools.voice_timeline import assemble_timeline
+        from ..tools.bgm_duck_mux import duck_and_mux
+
+        run_dir = pipe.run_dir
+        plan = json.loads((run_dir / "cutting_plan.json").read_text(encoding="utf-8"))
+        brief = (run_dir / "project_brief.md").read_text(encoding="utf-8")
+        bgm_video = run_dir / "outputs" / "v1_bgm_final.mp4"
+        if not bgm_video.exists():
+            bgm_video = run_dir / "outputs" / "v1.mp4"
+
+        voice_dir = run_dir / "voice"
+        bilingual = voice_dir / "voiceover_script_bilingual.json"
+        if not bilingual.exists():
+            await asyncio.to_thread(propose_script, run_dir, brief, plan, bilingual)
+
+        per = voice_dir / f"voiceover_script_{lang}.json"
+        seg_dir = voice_dir / f"per_segment_{lang}"
+        voice_full = voice_dir / f"voice_full_{lang}.wav"
+        final = run_dir / "outputs" / f"final_{lang}.mp4"
+
+        # Step 2 · TTS with retry (bing.com flaky on this network)
+        import time as _t, shutil as _sh
+        last_sr = None
+        last_err = None
+        for attempt in range(5):
+            if seg_dir.exists():
+                _sh.rmtree(seg_dir)
+            try:
+                last_sr = await asyncio.to_thread(synth_script, per, seg_dir)
+                break
+            except Exception as e:
+                last_err = e
+                pipe.log.warning(f"tts attempt {attempt+1} failed: {type(e).__name__}: {str(e)[:120]}")
+                _t.sleep(15)
+        if last_sr is None:
+            raise RuntimeError(f"TTS still failing after 5 retries: {last_err}")
+
+        # Step 3 · timeline
+        await asyncio.to_thread(assemble_timeline, last_sr, bgm_video, voice_full)
+
+        # Step 4 · ducking + mux
+        await asyncio.to_thread(duck_and_mux, bgm_video, voice_full, per, final, 0.7, 0.3)
+
+        pipe.record_asset(f"final_{lang}", final, verified=True)
+        pipe.transition(phase=5, gate="done")
+    except Exception as e:
+        pipe.log.exception(f"phase5 failed: {e}")
+        pipe.bus.emit("asset_failed", agent="phase5", error=str(e), error_type=type(e).__name__)
+    finally:
+        await REGISTRY.mark_done(pipe.run_id)
+
 
 def _cli_state(run_dir: Path) -> dict:
     """Aggregate CLI-recorder state for templates: planned_command + recording presence."""
@@ -1356,9 +1615,10 @@ async def accept_cli_route(project: str, run_id: str):
     await asyncio.to_thread(_sh.copy2, src, target)
     pipe.record_asset("recording_test", target, verified=True, source="cli_recorder")
     pipe.bus.emit("asset_verified", agent="pipeline", name="recording_test", path=str(target))
+    pipe.transition(phase=3, gate="running")
     return HTMLResponse(
-        '<div class="text-emerald-400 text-sm py-2">✅ 已采纳 → recordings/test.mp4</div>',
-        headers={"HX-Trigger": "phase2-refresh"},
+        '<div class="text-emerald-400 text-sm py-2">✅ 已采纳 → Phase 3</div>',
+        headers={"HX-Trigger": "phase-refresh"},
     )
 
 
