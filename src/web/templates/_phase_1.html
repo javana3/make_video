@@ -1,21 +1,45 @@
 <!-- Phase 1 partial: ProjectAnalyzer briefs (two versions) + iterate / approve.
      All content is lazy-loaded via polling so iterate / brief refresh "just works". -->
 
-<!-- Brief cards: standard + deep, side-by-side. Auto-refreshes every 3s. -->
+{% if not phase_ctx.clone_done %}
+<!-- Clone in progress (or pending) — polled every 2s with transition to
+     avoid flicker. When phase=done the endpoint sends HX-Refresh:true so
+     the full page reloads into the briefs view (no manual button needed). -->
+<div hx-get="/runs/{{ project }}/{{ run_id }}/clone_panel"
+     hx-trigger="load, every 2s"
+     hx-swap="innerHTML transition:true">
+  <div class="rounded-lg border border-sky-700/40 bg-sky-950/15 px-5 py-6 text-center text-sky-300 text-sm">
+    Loading clone progress...
+  </div>
+</div>
+{% else %}
+<!-- Brief cards: standard + deep, side-by-side. Polls every 8s (slow on
+     purpose — briefs are write-once per agent run; faster polling just
+     destroys the user's scroll position while reading). Page scroll is
+     saved before each swap and restored after. -->
 <div hx-get="/runs/{{ project }}/{{ run_id }}/briefs_panel"
-     hx-trigger="load, every 3s"
-     hx-swap="innerHTML">
+     hx-trigger="load, every 8s"
+     hx-swap="innerHTML"
+     hx-on::before-swap="window.__savedScrollY = window.scrollY"
+     hx-on::after-swap="if (typeof window.__savedScrollY === 'number') window.scrollTo(0, window.__savedScrollY)">
   <div class="rounded-lg border border-slate-800 bg-slate-900/30 px-6 py-12 text-center text-slate-500 text-sm">
     Loading briefs...
   </div>
 </div>
+{% endif %}
 
-<!-- Iterate / approve panel. Polls every 1.5s; switches between form ↔ progress card. -->
+{% if phase_ctx.clone_done %}
+<!-- Iterate / approve panel. Polls every 2s when agent IS running (to track
+     progress), every 8s when idle. Saves page scroll across swaps to avoid
+     destroying the user's reading position. -->
 <div hx-get="/runs/{{ project }}/{{ run_id }}/iterate_panel"
-     hx-trigger="load, every 1500ms"
+     hx-trigger="load, every 2s"
      hx-swap="innerHTML"
-     hx-disinherit="hx-trigger">
+     hx-disinherit="hx-trigger"
+     hx-on::before-swap="window.__savedScrollY = window.scrollY"
+     hx-on::after-swap="if (typeof window.__savedScrollY === 'number') window.scrollTo(0, window.__savedScrollY)">
   <div class="rounded-lg border border-slate-800 bg-slate-900/30 px-6 py-6 text-center text-slate-500 text-sm">
     Loading actions...
   </div>
 </div>
+{% endif %}

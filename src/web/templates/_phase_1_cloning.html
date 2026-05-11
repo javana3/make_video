@@ -1,0 +1,85 @@
+{# Live clone-progress panel — polled every 1s by _phase_1.html.
+   Auto-stops polling once `progress.phase == "done"` (we add hx-swap-oob signaling). #}
+{% set p = progress or {} %}
+{% set ph = p.get("phase", "starting") %}
+{% set pct = p.get("pct") %}
+{% set elapsed = p.get("elapsed", 0) %}
+{% set last_line = p.get("last_line", "") %}
+
+<div class="rounded-lg border border-sky-700/40 bg-sky-950/15 px-5 py-4 space-y-3">
+  <div class="flex items-baseline gap-2 flex-wrap">
+    <span class="text-base font-semibold text-sky-200">📥 拉取仓库中</span>
+    <code class="text-xs text-slate-400 truncate max-w-[36rem]">{{ repo_url or "(unknown)" }}</code>
+    <span class="ml-auto text-xs text-slate-500">elapsed {{ elapsed }}s</span>
+  </div>
+
+  {# Phase chip — what git is doing right now #}
+  <div class="flex items-baseline gap-2 text-sm">
+    <span class="text-slate-400">phase:</span>
+    {% set chip = {
+      "starting":     ("text-sky-300",     "握手中"),
+      "enumerating":  ("text-sky-300",     "remote 枚举对象"),
+      "compressing":  ("text-sky-300",     "remote 压缩"),
+      "receiving":    ("text-emerald-300", "下载对象"),
+      "resolving":    ("text-emerald-300", "解析 deltas"),
+      "done":         ("text-emerald-300", "完成"),
+      "failed":       ("text-rose-300",    "失败"),
+      "timeout":      ("text-rose-300",    "超时"),
+      "copying":      ("text-emerald-300", "本地拷贝"),
+    }.get(ph, ("text-slate-300", ph)) %}
+    <span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 {{ chip[0] }} font-mono">
+      {{ chip[1] }}
+    </span>
+    {% if pct is not none %}
+    <span class="text-slate-300 font-mono">{{ pct }}%</span>
+    {% endif %}
+  </div>
+
+  {# Progress bar (only if pct available) #}
+  {% if pct is not none %}
+  <div class="h-2 bg-slate-800 rounded overflow-hidden">
+    <div class="h-full bg-gradient-to-r from-sky-500 to-emerald-400 transition-all duration-300"
+         style="width: {{ pct }}%"></div>
+  </div>
+  {% endif %}
+
+  {# Stats grid #}
+  {% if p.get("size_text") or p.get("speed_text") or p.get("objects_done") %}
+  <div class="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+    {% if p.get("size_text") %}
+    <div class="bg-slate-950/40 border border-slate-800 rounded px-2 py-1">
+      <span class="text-slate-500">下载大小</span>
+      <span class="ml-2 text-slate-200 font-mono">{{ p.size_text }}</span>
+    </div>
+    {% endif %}
+    {% if p.get("speed_text") %}
+    <div class="bg-slate-950/40 border border-slate-800 rounded px-2 py-1">
+      <span class="text-slate-500">速度</span>
+      <span class="ml-2 text-slate-200 font-mono">{{ p.speed_text }}</span>
+    </div>
+    {% endif %}
+    {% if p.get("objects_done") %}
+    <div class="bg-slate-950/40 border border-slate-800 rounded px-2 py-1">
+      <span class="text-slate-500">objects</span>
+      <span class="ml-2 text-slate-200 font-mono">{{ p.objects_done }}/{{ p.objects_total }}</span>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# Latest git stderr line — raw but useful #}
+  {% if last_line %}
+  <div class="text-xs text-slate-400 font-mono bg-black/40 border border-slate-800 rounded px-3 py-2 break-all">
+    <span class="text-slate-600">git ▸</span> {{ last_line }}
+  </div>
+  {% endif %}
+
+  {# When clone is done: explicit hand-off card. The parent page's polling
+     of /clone_panel will fetch this once and stop polling (we send
+     HX-Refresh:true so the page reloads into the briefs view). #}
+  {% if ph == "done" %}
+  <div class="mt-2 rounded border border-emerald-700/40 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-200">
+    ✓ Clone 完成（{{ elapsed }}s）→ 即将进入 Agent 1 分析阶段，页面将自动刷新...
+  </div>
+  {% endif %}
+</div>

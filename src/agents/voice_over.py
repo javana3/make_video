@@ -95,6 +95,8 @@ def propose_script(run_dir: Path,
     log = agent_logger("agent5_voice")
     client = anthropic_client()
     model = model_for("reasoning")
+    from ._prompt_override import get_system_prompt
+    effective_system_prompt = get_system_prompt("voice_over", SYSTEM_PROMPT, run_dir)
 
     started = datetime.now(timezone.utc)
     log.info(f"start  model={model}  feedback={'yes' if feedback else 'no'}")
@@ -107,11 +109,22 @@ def propose_script(run_dir: Path,
     if feedback:
         user_msg += f"\n=== USER FEEDBACK on previous draft ===\n{feedback}\n"
 
-    resp = client.messages.create(
-        model=model,
-        max_tokens=2000,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_msg}],
+    # glm-5.1 uses extended thinking by default; thinking burns tokens before
+    # any text comes out. 2000 was too tight — model hit max_tokens with all
+    # budget in thinking, leaving no JSON text. 8192 leaves room for both.
+    from .error_agent import llm_call_with_recovery
+    resp = llm_call_with_recovery(
+        lambda: client.messages.create(
+            model=model,
+            max_tokens=8192,
+            system=effective_system_prompt,
+            messages=[{"role": "user", "content": user_msg}],
+        ),
+        run_dir=run_dir,
+        agent="voice_over",
+        step_label="LLM call (single-shot)",
+        context_hint={"model": model, "feedback": bool(feedback)},
+        log=log,
     )
     log.info(f"  ← stop_reason={resp.stop_reason} in={resp.usage.input_tokens} out={resp.usage.output_tokens}")
 

@@ -121,22 +121,56 @@
       {% endif %}
     </div>
 
-    {# user-in-loop chat input #}
-    <form hx-post="/runs/{{ project }}/{{ run_id }}/demo_driver/feedback"
-          hx-target="#demo-feedback-result" hx-swap="innerHTML"
-          class="space-y-2">
-      <div class="text-xs text-slate-400">💬 跟 Driver 说话（下一轮 LLM 调用前 spliced 进 conversation）</div>
-      <textarea name="text" rows="2" required
-                placeholder="例：跳过登录，直接演示主功能"
-                class="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-slate-200 font-mono"></textarea>
-      <div class="flex items-center gap-2">
-        <button type="submit"
-                class="px-3 py-1 bg-emerald-500 hover:bg-emerald-400 rounded text-white text-xs">
-          send
-        </button>
-        <div id="demo-feedback-result" class="text-xs"></div>
+    {# user-in-loop chat — THE core interaction mode. Strong guidance because
+       previous test sessions skipped this and let agent solo for 12 minutes. #}
+    <div class="rounded-lg border-2 border-emerald-500/40 bg-emerald-950/20 px-4 py-3 space-y-2">
+      <div class="flex items-baseline gap-2">
+        <span class="text-base">💬</span>
+        <span class="text-sm font-semibold text-emerald-200">User-in-loop chat — 这是核心交互</span>
+        <span class="text-xs text-emerald-400/70">每条留言下一轮 LLM 前 spliced 进 conversation</span>
       </div>
-    </form>
+      <p class="text-xs text-slate-300 leading-relaxed">
+        Driver 自己也能跑，但你 <b>实时指挥</b> 才是这项目的设计意图。它每步 LLM 前都会读你这里的新留言。
+        <br/>
+        <span class="text-slate-400">常用指令例：</span>
+      </p>
+      <div class="flex flex-wrap gap-1.5 text-xs">
+        <button type="button" onclick="this.parentElement.parentElement.querySelector('textarea').value='跳过登录，直接演示主功能';"
+                class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 border border-slate-700">
+          📍 跳过登录
+        </button>
+        <button type="button" onclick="this.parentElement.parentElement.querySelector('textarea').value='这一段够了，去演下一个 tab';"
+                class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 border border-slate-700">
+          ⏭ 切换下一个功能
+        </button>
+        <button type="button" onclick="this.parentElement.parentElement.querySelector('textarea').value='看见左侧 sidebar 了吗？点 History 进去看看';"
+                class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 border border-slate-700">
+          🎯 指定操作
+        </button>
+        <button type="button" onclick="this.parentElement.parentElement.querySelector('textarea').value='点击这个红色按钮看会发生什么';"
+                class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded text-slate-300 border border-slate-700">
+          🔍 探索 UI
+        </button>
+        <button type="button" onclick="this.parentElement.parentElement.querySelector('textarea').value='够了，结束演示';"
+                class="px-2 py-0.5 bg-rose-900/40 hover:bg-rose-900/60 rounded text-rose-200 border border-rose-700/40">
+          🛑 结束
+        </button>
+      </div>
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/demo_driver/feedback"
+            hx-target="#demo-feedback-result" hx-swap="innerHTML"
+            class="space-y-2">
+        <textarea name="text" rows="2" required
+                  placeholder="跟 Driver 说话…（中英都行，回车不发送，点 send 才发）"
+                  class="w-full bg-slate-900 border border-emerald-700/40 focus:border-emerald-500 rounded px-2 py-1.5 text-sm text-slate-100 font-mono outline-none"></textarea>
+        <div class="flex items-center gap-2">
+          <button type="submit"
+                  class="px-3 py-1.5 bg-emerald-500 hover:bg-emerald-400 rounded text-white text-xs font-semibold">
+            📤 send to Driver
+          </button>
+          <div id="demo-feedback-result" class="text-xs"></div>
+        </div>
+      </form>
+    </div>
   {% endif %}
 
   {# ────────────── completed → review + accept ────────────── #}
@@ -165,7 +199,7 @@
   {% if status == 'error' %}
     <div class="bg-rose-500/10 border border-rose-500/30 rounded px-3 py-2 text-sm text-rose-200">
       Driver 出错：{{ p.get('error', '(no detail)') }}<br/>
-      <span class="text-xs text-rose-300/70">看 <code>logs/demo_driver.jsonl</code> + Langfuse trace 排查</span>
+      <span class="text-xs text-rose-300/70">看 <code>logs/demo_driver.jsonl</code> + Phoenix trace 排查</span>
     </div>
   {% endif %}
 

@@ -440,6 +440,8 @@ def run_cutting_planner(run_dir: Path,
     log = agent_logger("agent3_remotion")
     client = anthropic_client()
     model = model_for("reasoning")
+    from ._prompt_override import get_system_prompt
+    effective_system_prompt = get_system_prompt("remotion_composer", SYSTEM_PROMPT, run_dir)
     started_at = datetime.now(timezone.utc)
     started_mono = _time.monotonic()
     rec_dur = (available_assets.get("recording") or {}).get("duration_s", 0)
@@ -483,15 +485,27 @@ def run_cutting_planner(run_dir: Path,
     for step in range(max_steps):
         log.info(f"step {step+1}/{max_steps} → LLM")
         write_progress(step + 1, "→ LLM (waiting response)")
-        resp = client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            messages=messages,
+        # cutting_plan with 6-8 scenes + content_templates regularly needs
+        # 6-7k output tokens. 4096 cap caused stop_reason=max_tokens mid-plan,
+        # never emitting a valid emit_cutting_plan tool call.
+        from .error_agent import llm_call_with_recovery
+        resp = llm_call_with_recovery(
+            lambda: client.messages.create(
+                model=model,
+                max_tokens=16384,
+                system=effective_system_prompt,
+                tools=TOOLS,
+                messages=messages,
+            ),
+            run_dir=run_dir,
+            agent="remotion_composer",
+            step_label=f"step {step + 1} LLM call",
+            context_hint={"model": model, "step": step + 1, "max_steps": max_steps,
+                          "input_msgs": len(messages)},
+            log=log,
         )
         if resp.stop_reason == "max_tokens":
-            log.warning(f"step {step+1}: stop_reason=max_tokens")
+            log.warning(f"step {step+1}: stop_reason=max_tokens — even at 16k cap, plan was truncated")
         log.info(f"step {step+1} ← stop_reason={resp.stop_reason}  in={resp.usage.input_tokens} out={resp.usage.output_tokens}")
         messages.append({"role": "assistant", "content": resp.content})
 

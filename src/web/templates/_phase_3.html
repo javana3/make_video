@@ -1,45 +1,14 @@
-<!-- Phase 3 · Remotion: cutting_plan + render → outputs/v1.mp4 -->
-{% set v1_path = run_dir + "/outputs/v1.mp4" %}
-{% set v1_exists = phase3_state.v1_exists %}
-{% set is_running = phase3_state.is_running %}
+<!-- Phase 3 · Remotion: cutting_plan + render → outputs/v1.mp4
+     Real content lives in _phase_3_panel.html which is hx-polled every 3s
+     so the user always sees current state (running indicator, current step,
+     elapsed time) instead of a stale snapshot. -->
 
-<div class="rounded-lg border border-amber-700/40 bg-amber-950/15 px-5 py-5 space-y-3">
-  <div class="flex items-center gap-2">
-    <span class="text-base font-semibold text-amber-200">🎬 Phase 3 · Remotion 合成</span>
-    <span class="text-xs text-slate-500">cutting_plan.json + TSX render → v1.mp4</span>
+<div hx-get="/runs/{{ project }}/{{ run_id }}/phase3_panel"
+     hx-trigger="load, every 3s, phase3-refresh from:body"
+     hx-swap="innerHTML"
+     hx-on::before-swap="window.__savedScrollY = window.scrollY"
+     hx-on::after-swap="if (typeof window.__savedScrollY === 'number') window.scrollTo(0, window.__savedScrollY)">
+  <div class="rounded-lg border border-amber-700/40 bg-amber-950/15 px-5 py-12 text-center text-amber-300 text-sm">
+    Loading Phase 3 status...
   </div>
-
-  {% if not v1_exists %}
-  <p class="text-sm text-slate-400">
-    Agent 3 读 brief + recording 元数据，规划 cutting_plan.json，生成 Remotion TSX，npm install + 渲染出 v1.mp4。
-    <span class="text-slate-500">~5-10 min（首次 npm install 占大头）</span>
-  </p>
-  <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase3" hx-target="#action-result" hx-swap="innerHTML">
-    <button type="submit" {% if is_running %}disabled{% endif %}
-            class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-sm rounded font-semibold disabled:opacity-50">
-      🎬 跑 Phase 3
-    </button>
-    {% if is_running %}<span class="ml-3 text-xs text-amber-300">⏳ 正在跑...</span>{% endif %}
-  </form>
-  {% else %}
-  <div class="text-sm text-slate-300">
-    ✅ v1.mp4 渲染完成 <span class="text-xs text-slate-500 ml-2">{{ phase3_state.v1_size_mb }} MB</span>
-  </div>
-  <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/v1.mp4"
-         controls class="w-full max-h-[60vh] rounded border border-slate-700 bg-black"></video>
-  {% if state.gate != 'done' %}
-  <div class="flex gap-2 flex-wrap">
-    <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_phase3" hx-target="#action-result" hx-swap="innerHTML">
-      <button type="submit" class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm rounded font-semibold">
-        ✓ 通过 → Phase 4
-      </button>
-    </form>
-    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase3" hx-target="#action-result" hx-swap="innerHTML">
-      <button type="submit" class="px-3 py-2 bg-amber-700 hover:bg-amber-600 text-white text-sm rounded">
-        ↻ 重跑
-      </button>
-    </form>
-  </div>
-  {% endif %}
-  {% endif %}
 </div>

@@ -83,6 +83,17 @@ def traced_agent(name: str, phase: int) -> Callable:
                 span.set_attribute("agent.name", name)
                 span.set_attribute("agent.phase", phase)
                 span.set_attribute("run_id", run_id)
+                # Phoenix routes spans to projects via this attribute. Setting
+                # it per-run gives each pipeline run its own project in the
+                # Phoenix UI dropdown (auto-created on first span). This is
+                # the OpenInference semantic convention recognized by Phoenix.
+                ctx_run_dir = ctx.get("run_dir")
+                project = ctx_run_dir.parent.parent.name if ctx_run_dir else "default"
+                if run_id != "unknown":
+                    span.set_attribute(
+                        "openinference.project.name",
+                        f"{project}-{run_id}",
+                    )
 
                 # Record positional args
                 for i, val in enumerate(args):

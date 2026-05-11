@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Prompts · {{ project }} / {{ run_id }}{% endblock %}
+
+{% block breadcrumb %}
+<span class="text-slate-500">/</span>
+<a href="/runs/{{ project }}/{{ run_id }}" class="text-slate-300 hover:text-emerald-400">{{ project }}</a>
+<span class="text-slate-500">/</span>
+<span class="font-mono text-xs text-slate-400">{{ run_id }}</span>
+<span class="text-slate-500">/</span>
+<span class="text-emerald-300">📝 Prompts</span>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto space-y-5">
+
+  <div class="rounded-xl border border-slate-800 bg-slate-900/40 px-5 py-4">
+    <h1 class="text-xl font-semibold text-slate-100">📝 System Prompts (per-run override)</h1>
+    <p class="text-sm text-slate-400 mt-1">
+      每个 agent 的默认 SYSTEM_PROMPT 来自 .py 源码；你在这里改的<b>只对本 run 生效</b>，存在
+      <code class="text-xs text-purple-300">{{ run_id }}/prompts/&lt;agent&gt;.txt</code>。
+      留空保存 = 删 override（下次用默认）。 <b>需要重启 / 重跑对应 phase 才生效</b>。
+    </p>
+  </div>
+
+  {% for a in agents %}
+  <div class="rounded-xl border border-slate-800 bg-slate-900/40 overflow-hidden">
+    <div class="flex items-baseline gap-3 px-5 py-3 border-b border-slate-800 bg-slate-950/40">
+      <span class="text-base font-semibold text-slate-100">{{ a.name }}</span>
+      <span class="text-xs px-2 py-0.5 bg-slate-800 rounded text-slate-400">{{ a.phase }}</span>
+      <span class="text-xs text-slate-500">{{ a.model }}</span>
+      {% if a.has_override %}
+      <span class="ml-auto text-xs px-2 py-0.5 bg-purple-500/20 text-purple-300 border border-purple-500/40 rounded">override 已启用</span>
+      {% else %}
+      <span class="ml-auto text-xs px-2 py-0.5 bg-slate-700/40 text-slate-400 border border-slate-600 rounded">默认</span>
+      {% endif %}
+    </div>
+
+    <div class="px-5 py-4 space-y-3">
+      <details class="text-sm">
+        <summary class="cursor-pointer text-slate-300 hover:text-emerald-400">
+          📖 默认 prompt（{{ a.default_prompt|length }} chars） — 点开看
+        </summary>
+        <p class="text-xs text-slate-500 mt-1 mb-2 italic">{{ a.default_note }}</p>
+        <pre class="text-xs text-slate-300 bg-slate-950/60 border border-slate-800 rounded p-3 max-h-96 overflow-auto whitespace-pre-wrap font-mono">{{ a.default_prompt }}</pre>
+      </details>
+
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/prompts/{{ a.key }}"
+            hx-target="#save-{{ a.key }}" hx-swap="innerHTML"
+            class="space-y-2">
+        <label class="text-xs text-slate-400 font-semibold">
+          ✏️ Override（写在这里 = 替换默认；留空 = 删 override）
+        </label>
+        <textarea name="text" rows="10"
+                  placeholder="Leave empty to use the default prompt above…"
+                  class="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded px-3 py-2 text-xs text-slate-100 font-mono outline-none">{{ a.override }}</textarea>
+        <div class="flex items-center gap-2">
+          <button type="submit"
+                  class="px-4 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-200 rounded text-sm font-semibold">
+            💾 保存 override
+          </button>
+          <button type="button"
+                  onclick="this.form.querySelector('textarea').value=''"
+                  class="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-300 rounded text-xs">
+            🧹 清空
+          </button>
+          <div id="save-{{ a.key }}" class="ml-2"></div>
+        </div>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+
+</div>
+{% endblock %}

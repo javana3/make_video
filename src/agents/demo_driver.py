@@ -255,6 +255,63 @@ _PTY_TOOLS = [
      "input_schema": {"type": "object", "properties": {}}},
 ]
 
+_OBSERVABILITY_TOOLS = [
+    {"name": "list_services",
+     "description": "List backend services running in this run (name / port / status / health_url / log paths). Use this to discover what services exist before tailing their logs.",
+     "input_schema": {"type": "object", "properties": {}}},
+    {"name": "tail_service_log",
+     "description": (
+         "Read the last N lines of a service's stdout/stderr/both log. The "
+         "PRIMARY way to see backend errors — Python tracebacks, FastAPI 500 "
+         "reasons, ComfyUI workflow failures, etc. live in stderr. Use when "
+         "the UI is stuck, returns an error, or after any browser action that "
+         "should have triggered backend work."
+     ),
+     "input_schema": {
+         "type": "object",
+         "properties": {
+             "name": {"type": "string", "description": "Service name from list_services."},
+             "kind": {"type": "string", "enum": ["stderr", "stdout", "both"],
+                       "default": "stderr"},
+             "lines": {"type": "integer", "default": 100,
+                        "description": "Number of trailing lines to return."},
+         },
+         "required": ["name"],
+     }},
+    {"name": "browser_console_log",
+     "description": (
+         "Get JS console messages captured by the browser (errors, warnings, "
+         "logs from the page's own scripts). Useful when a button click does "
+         "nothing — there's often a JS error in console. Web mode only."
+     ),
+     "input_schema": {
+         "type": "object",
+         "properties": {
+             "level": {"type": "string",
+                        "enum": ["error", "warning", "info", "log", "debug", "all"],
+                        "default": "error"},
+             "limit": {"type": "integer", "default": 50},
+             "since_action": {"type": "integer", "default": 0,
+                                "description": "Only entries since N-th browser action (0 = all). Useful: read browser_url first to learn current n_actions value."},
+         },
+     }},
+    {"name": "browser_network_failures",
+     "description": (
+         "Get 4xx/5xx HTTP responses observed by the browser (failed XHR / "
+         "fetch / page resource loads). Use when an API call from the page "
+         "fails silently. Web mode only."
+     ),
+     "input_schema": {
+         "type": "object",
+         "properties": {
+             "min_status": {"type": "integer", "default": 400},
+             "limit": {"type": "integer", "default": 50},
+             "since_action": {"type": "integer", "default": 0},
+         },
+     }},
+]
+
+
 _CONTROL_TOOLS = [
     {"name": "mark_caption",
      "description": "Tag the CURRENT recording timestamp with a bilingual caption. Call when a meaningful beat happens on screen.",
@@ -524,9 +581,15 @@ def run_demo_driver(*,
         session_t0 = time.monotonic()
 
     # ─── tools
+    # Service log readers (list_services / tail_service_log) are always
+    # available. Browser console / network tools are web-only.
     tools = list(_SOURCE_TOOLS) + list(_CONTROL_TOOLS)
+    tools += [t for t in _OBSERVABILITY_TOOLS
+              if t["name"] in ("list_services", "tail_service_log")]
     if mode == "web":
         tools += list(_BROWSER_TOOLS)
+        tools += [t for t in _OBSERVABILITY_TOOLS
+                  if t["name"] in ("browser_console_log", "browser_network_failures")]
     else:
         tools += list(_PTY_TOOLS)
 
@@ -605,8 +668,35 @@ def run_demo_driver(*,
             return session.wait_for(selector=args.get("selector"),
                                      text=args.get("text"),
                                      timeout_ms=int(args.get("timeout_ms", 30000)))
-        if name == "browser_url":   return {"url": session.url()}
+        if name == "browser_url":   return {"url": session.url(), "n_actions": session.n_actions if mode == "web" else 0}
         if name == "browser_title": return {"title": session.title()}
+        # observability — backend service logs (always available)
+        if name == "list_services":
+            from ..tools.service_observability import list_services
+            return list_services(run_dir)
+        if name == "tail_service_log":
+            from ..tools.service_observability import tail_service_log
+            return tail_service_log(
+                run_dir=run_dir, name=args["name"],
+                kind=args.get("kind", "stderr"),
+                lines=int(args.get("lines", 100)),
+            )
+        # observability — browser-side (web mode only)
+        if name == "browser_console_log":
+            level = args.get("level", "error")
+            if level == "all":
+                level = None
+            return session.console_log(
+                level=level,
+                since_action=int(args.get("since_action", 0)),
+                limit=int(args.get("limit", 50)),
+            )
+        if name == "browser_network_failures":
+            return session.network_failures(
+                since_action=int(args.get("since_action", 0)),
+                min_status=int(args.get("min_status", 400)),
+                limit=int(args.get("limit", 50)),
+            )
         # cli ops
         if name == "pty_screen":      return session.screen_text()
         if name == "pty_read_recent": return session.read_recent(int(args.get("n_lines", 30)))
@@ -621,9 +711,17 @@ def run_demo_driver(*,
         return f"ERROR: unknown tool {name!r}"
 
     # ─── main loop
+    # Use a vision-capable model: Demo Driver calls browser_screenshot which
+    # feeds PNG to the LLM. glm-5.1 + minimax-m2.7 are text-only — they error
+    # out with 400 'Model do not support image input'. LLM_VISION env var
+    # (default kimi-k2.6) selects an ARK Coding Plan model that accepts images.
     client = anthropic_client()
-    model = model_for("reasoning")
-    log.info(f"loop start  model={model}  safety_cap={safety_step_cap}")
+    model = model_for("vision") if mode == "web" else model_for("reasoning")
+    # Per-run prompt override: user may have edited via the Prompts panel.
+    from ._prompt_override import get_system_prompt
+    effective_system_prompt = get_system_prompt("demo_driver", SYSTEM_PROMPT, run_dir)
+    log.info(f"loop start  model={model}  mode={mode}  safety_cap={safety_step_cap}  "
+                f"prompt_override={'YES' if effective_system_prompt != SYSTEM_PROMPT else 'NO'}")
 
     try:
         for step in range(safety_step_cap):
@@ -642,9 +740,18 @@ def run_demo_driver(*,
             progress.last_action = f"→ LLM (step {step+1})"
             progress.write()
 
-            resp = client.messages.create(
-                model=model, max_tokens=4096,
-                system=SYSTEM_PROMPT, tools=tools, messages=messages,
+            from .error_agent import llm_call_with_recovery
+            resp = llm_call_with_recovery(
+                lambda: client.messages.create(
+                    model=model, max_tokens=4096,
+                    system=effective_system_prompt, tools=tools, messages=messages,
+                ),
+                run_dir=run_dir,
+                agent="demo_driver",
+                step_label=f"step {step + 1} LLM call",
+                context_hint={"model": model, "step": step + 1, "mode": mode,
+                              "input_msgs": len(messages)},
+                log=log,
             )
             log.info(f"step {step+1}  stop={resp.stop_reason}  "
                      f"in={resp.usage.input_tokens}  out={resp.usage.output_tokens}")

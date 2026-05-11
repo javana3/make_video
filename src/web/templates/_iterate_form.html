@@ -55,8 +55,7 @@
     <p class="text-xs text-slate-500 mb-3">选择最终采用的版本，进入 Phase 2（HTML 协作 + 录屏）。</p>
     <form hx-post="/runs/{{ project }}/{{ run_id }}/approve"
           hx-target="#action-result"
-          hx-swap="innerHTML"
-          hx-confirm="确认通过 Gate #1，进入 Phase 2？">
+          hx-swap="innerHTML">
       <fieldset class="flex items-center gap-4 flex-wrap mb-3">
         {% if has_standard %}
         <label class="inline-flex items-center gap-2 cursor-pointer">

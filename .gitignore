@@ -17,8 +17,10 @@ workspace/
 .idea/
 .claude/
 
-# Langfuse (volumes are in docker, not in repo)
+# Observability runtime data — Langfuse volumes live in docker, Phoenix
+# sqlite + trace exports live in .phoenix/. Neither belongs in the repo.
 .langfuse/
+.phoenix/
 
 # Node (in case Remotion projects spill module dirs into root)
 node_modules/
@@ -29,6 +31,8 @@ node_modules/
 
 # Local smoke / e2e harnesses (not part of the project's test suite)
 /e2e_*.py
+/_retry_*.py
+/_smoke_*.py
 
 # OS
 Thumbs.db

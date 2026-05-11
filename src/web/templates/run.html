@@ -14,8 +14,20 @@
   📊 Trace + Logs
 </a>
 <a href="/runs/{{ project }}/{{ run_id }}/opendesign"
-   class="inline-flex items-center gap-1.5 px-3 py-1 mr-3 bg-purple-700/30 hover:bg-purple-600/40 border border-purple-600/40 text-purple-200 text-xs rounded">
+   class="inline-flex items-center gap-1.5 px-3 py-1 mr-2 bg-purple-700/30 hover:bg-purple-600/40 border border-purple-600/40 text-purple-200 text-xs rounded">
   🎨 OpenDesign
+</a>
+<a href="/runs/{{ project }}/{{ run_id }}/prompts"
+   class="inline-flex items-center gap-1.5 px-3 py-1 mr-2 bg-amber-700/30 hover:bg-amber-600/40 border border-amber-600/40 text-amber-200 text-xs rounded">
+  📝 Prompts
+</a>
+<a href="/runs/{{ project }}/{{ run_id }}/scores"
+   class="inline-flex items-center gap-1.5 px-3 py-1 mr-2 bg-cyan-700/30 hover:bg-cyan-600/40 border border-cyan-600/40 text-cyan-200 text-xs rounded">
+  ⭐ Scores
+</a>
+<a href="/runs/{{ project }}/{{ run_id }}/errors"
+   class="inline-flex items-center gap-1.5 px-3 py-1 mr-3 bg-rose-700/30 hover:bg-rose-600/40 border border-rose-600/40 text-rose-200 text-xs rounded">
+  🚨 Errors
 </a>
 <div hx-get="/runs/{{ project }}/{{ run_id }}/status_chip"
      hx-trigger="every 2s"
@@ -59,28 +71,98 @@
   <!-- Main -->
   <section class="col-span-12 lg:col-span-9 space-y-5">
 
-    <!-- Phase header -->
-    <div class="flex items-center justify-between">
-      <div>
-        <h1 class="text-2xl font-bold tracking-tight">{{ phase_label }}</h1>
-        <div class="flex items-center gap-3 mt-1 text-sm">
-          <span class="text-slate-500">Gate:</span>
-          <span class="font-mono text-slate-300">{{ state.gate }}</span>
-          {% if state.gate == 'done' %}
-            <span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-300">DONE</span>
-          {% elif state.gate.startswith('waiting_') %}
-            <span class="px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-300">WAITING USER</span>
-          {% else %}
-            <span class="px-2 py-0.5 rounded text-xs bg-sky-500/20 text-sky-300">RUNNING</span>
-          {% endif %}
-        </div>
+    {% if state.last_error %}
+    <!-- Error banner — visible whenever last_error is set; cleared on retry/clear -->
+    <div class="rounded-lg border-2 border-rose-500/60 bg-rose-950/40 px-5 py-4 space-y-3">
+      <div class="flex items-baseline gap-2 flex-wrap">
+        <span class="text-base">❌</span>
+        <span class="text-base font-semibold text-rose-200">Phase {{ state.last_error.phase }} · {{ state.last_error.agent }} 失败</span>
+        <span class="ml-auto text-xs text-rose-400/70">{{ state.last_error.ts[:19] }}</span>
       </div>
-      <!-- Phase progress dots -->
-      <div class="flex items-center gap-1.5">
+      <div class="text-sm text-rose-100">
+        <code class="text-rose-300">{{ state.last_error.error_type }}</code>:
+        <span class="break-all">{{ state.last_error.error_text }}</span>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap pt-1">
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/retry"
+              hx-target="#retry-result"
+              hx-swap="innerHTML">
+          <button type="submit"
+                  class="px-4 py-1.5 bg-rose-500/30 hover:bg-rose-500/50 border border-rose-400/60 text-rose-100 rounded text-sm font-semibold">
+            🔁 重试
+          </button>
+        </form>
+        <a href="/runs/{{ project }}/{{ run_id }}/errors"
+           class="px-3 py-1.5 bg-amber-700/30 hover:bg-amber-600/40 border border-amber-600/40 text-amber-200 text-sm rounded">
+          🚨 ErrorAgent 建议
+        </a>
+        <a href="/runs/{{ project }}/{{ run_id }}/prompts"
+           class="px-3 py-1.5 bg-amber-700/30 hover:bg-amber-600/40 border border-amber-600/40 text-amber-200 text-sm rounded">
+          📝 改 Prompt
+        </a>
+        <span id="retry-result" class="ml-2 text-xs"></span>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Phase header -->
+    <div>
+      <h1 class="text-2xl font-bold tracking-tight">{{ phase_label }}</h1>
+      <div class="flex items-center gap-3 mt-1 text-sm">
+        <span class="text-slate-500">Gate:</span>
+        <span class="font-mono text-slate-300">{{ state.gate }}</span>
+        {% if state.gate == 'done' %}
+          <span class="px-2 py-0.5 rounded text-xs bg-emerald-500/20 text-emerald-300">DONE</span>
+        {% elif state.gate == 'failed' %}
+          <span class="px-2 py-0.5 rounded text-xs bg-rose-500/20 text-rose-300">FAILED</span>
+        {% elif state.gate.startswith('waiting_') %}
+          <span class="px-2 py-0.5 rounded text-xs bg-amber-500/20 text-amber-300">WAITING USER</span>
+        {% else %}
+          <span class="px-2 py-0.5 rounded text-xs bg-sky-500/20 text-sky-300">RUNNING</span>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Phase chain (prominent full-width row).
+         Past phase = green BUTTON, clickable → read-only view
+         Current   = amber pulse, not clickable (you're already here)
+         Future    = gray, locked, not clickable (haven't reached yet) -->
+    <div class="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-3">
+      <div class="flex items-baseline gap-2 mb-2">
+        <span class="text-xs font-semibold uppercase tracking-wider text-slate-500">Pipeline Chain</span>
+        <span class="text-[10px] text-slate-600 ml-auto">已完成的 phase 可点击查看（只读）</span>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap">
+        {% set phase_names = {1: "Brief", 2: "Setup + Demo", 3: "Remotion", 4: "BGM", 5: "VoiceOver"} %}
         {% for n in [1, 2, 3, 4, 5] %}
-        <span class="w-2.5 h-2.5 rounded-full
-          {% if n < state.phase %}bg-emerald-500{% elif n == state.phase %}bg-amber-400 animate-pulse{% else %}bg-slate-700{% endif %}"
-          title="Phase {{ n }}"></span>
+        {% set is_past = n < state.phase %}
+        {% set is_current = n == state.phase %}
+        {% if is_past %}
+        <a href="/runs/{{ project }}/{{ run_id }}/view_phase/{{ n }}"
+           title="📖 查看 Phase {{ n }} ({{ phase_names[n] }}) — 只读"
+           class="group inline-flex items-center gap-2 px-3 py-2 rounded-lg border-2 border-emerald-500/40 bg-emerald-500/5 hover:bg-emerald-500/15 hover:border-emerald-400 transition">
+          <span class="text-emerald-400">✓</span>
+          <span class="font-mono text-sm text-emerald-300 font-semibold">P{{ n }}</span>
+          <span class="text-xs text-emerald-400/80 hidden sm:inline">{{ phase_names[n] }}</span>
+          <span class="text-[10px] text-emerald-500/60 group-hover:text-emerald-300">📖</span>
+        </a>
+        {% elif is_current %}
+        <span class="inline-flex items-center gap-2 px-3 py-2 rounded-lg border-2 border-amber-500/60 bg-amber-500/15"
+              title="Phase {{ n }} ({{ phase_names[n] }}) — 当前阶段">
+          <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+          <span class="font-mono text-sm text-amber-300 font-bold">P{{ n }}</span>
+          <span class="text-xs text-amber-300/90 font-semibold hidden sm:inline">{{ phase_names[n] }}</span>
+          <span class="text-[10px] text-amber-400/80">当前</span>
+        </span>
+        {% else %}
+        <span class="inline-flex items-center gap-2 px-3 py-2 rounded-lg border-2 border-slate-800 bg-slate-900/30 opacity-50"
+              title="Phase {{ n }} ({{ phase_names[n] }}) — 还未到达">
+          <span class="text-slate-600">🔒</span>
+          <span class="font-mono text-sm text-slate-600">P{{ n }}</span>
+          <span class="text-xs text-slate-600 hidden sm:inline">{{ phase_names[n] }}</span>
+        </span>
+        {% endif %}
+        {% if not loop.last %}<span class="text-slate-700 text-lg">→</span>{% endif %}
         {% endfor %}
       </div>
     </div>
@@ -105,9 +187,25 @@
     <!-- Action result (target for HTMX swap) -->
     <div id="action-result"></div>
 
-    <!-- Live agent log (only during agent runs) -->
+    <!-- Readable Pipeline Log (file-tailed, polled). Sticky-to-bottom: only
+         auto-scroll if user was ALREADY at the bottom before this swap. If
+         they scrolled up to read, leave their position alone. -->
     <div>
-      <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Live Console</h2>
+      <div class="flex items-baseline gap-2 mb-2">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-500">📜 Pipeline Log</h2>
+        <span class="ml-auto text-[10px] text-slate-600">每 2s 刷新 · 滚到底才会粘底</span>
+      </div>
+      <div id="run-log-tail"
+           class="rounded-lg border border-slate-800 bg-black/50 max-h-72 overflow-y-auto px-2 py-2"
+           hx-get="/runs/{{ project }}/{{ run_id }}/log_tail?n=50"
+           hx-trigger="load, every 2s"
+           hx-swap="innerHTML"
+           hx-on::before-swap="this.dataset.atBottom = (this.scrollHeight - this.scrollTop - this.clientHeight) < 5 ? '1' : '0'"
+           hx-on::after-swap="if (this.dataset.atBottom === '1') this.scrollTop = this.scrollHeight"></div>
+    </div>
+
+    <!-- Legacy SSE Live Console (removed — never delivered content) -->
+    <div style="display:none">
       <div class="rounded-lg border border-slate-800 bg-black/50 console-log"
            hx-ext="sse"
            sse-connect="/runs/{{ project }}/{{ run_id }}/agent_log">

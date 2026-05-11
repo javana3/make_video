@@ -30,6 +30,31 @@ md_renderer = MarkdownIt("commonmark", {"breaks": True, "linkify": True}).enable
 app = FastAPI(title="Promo Video Pipeline UI")
 
 
+def _fire_quality_judge(pipe: Pipeline, phase: str) -> None:
+    """Fire QualityJudge for a phase artifact in the background.
+
+    Schedules an asyncio task that runs the (sync) judge in a thread, so the
+    LLM call doesn't block the route response. Failures are swallowed and
+    logged — judge is auxiliary; pipeline should not stop if it fails.
+    """
+    async def _go():
+        try:
+            from ..agents.quality_judge import score_phase
+            await asyncio.to_thread(score_phase, phase, pipe.run_dir)
+        except Exception as e:
+            pipe.log.exception(f"quality_judge[{phase}] failed: {e}")
+    try:
+        asyncio.create_task(_go())
+    except RuntimeError:
+        pipe.log.warning(f"quality_judge[{phase}] could not schedule (no loop)")
+
+# Self-host Tailwind / htmx / htmx-sse from src/web/static/ — the project is
+# meant to run offline on a local box, so we cannot rely on cdn.tailwindcss.com
+# / unpkg.com. Files committed to repo to remove the network dependency.
+from fastapi.staticfiles import StaticFiles
+app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
+
+
 @app.middleware("http")
 async def normalize_empty_run_ids(request: Request, call_next):
     """`/runs///observability` (empty project + run_id from manual URL or stale
@@ -237,48 +262,120 @@ async def runs_new(request: Request,
     pipe.transition(phase=1, gate="running")
     set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
 
-    repo_dir = pipe.run_dir / "repo"
+    # Persist source-of-truth so retry can re-clone or re-copy without user re-input.
+    if mode == "url":
+        pipe.state.repo_url = url
+        pipe.save()
 
-    try:
-        if mode == "url":
-            pipe.log.info(f"cloning {url} → {repo_dir}")
-            await asyncio.to_thread(
-                shell_run,
-                ["git", "clone", "--depth=1", url, str(repo_dir)],
-                timeout=600, check=True,
-            )
-            pipe.record_asset("repo", repo_dir, verified=True, url=url, source="git_clone")
-        else:
-            pipe.log.info(f"copying {src_path} → {repo_dir}")
-            ignore = shutil.ignore_patterns(
-                ".git", ".venv", "venv", "node_modules", "__pycache__",
-                ".pytest_cache", "build", "dist", ".tox", ".mypy_cache",
-                ".idea", ".vscode", "*.pyc", "*.pyo",
-            )
-            await asyncio.to_thread(shutil.copytree, str(src_path), str(repo_dir), ignore=ignore, dirs_exist_ok=False)
-            pipe.record_asset("repo", repo_dir, verified=True, source="local_copy",
-                              source_path=str(src_path))
-    except Exception as e:
-        pipe.log.exception(f"repo prep failed: {e}")
-        pipe.bus.emit("asset_failed", agent="pipeline",
-                      name="repo", error=str(e), error_type=type(e).__name__)
-        return HTMLResponse(
-            f'<div class="text-rose-400 text-sm p-4">'
-            f'❌ {("clone" if mode == "url" else "copy")} 失败: {type(e).__name__}: {e}</div>',
-            status_code=500,
-        )
+    # Defer the clone/copy to a background task so the user lands on the run
+    # page IMMEDIATELY and watches progress there (instead of staring at a
+    # spinning form for minutes during a slow clone).
+    if mode == "url":
+        asyncio.create_task(_run_clone_and_analyze(pipe, url=url))
+    else:
+        asyncio.create_task(_run_localcopy_and_analyze(pipe, src_path=src_path))
 
-    # Kick off Phase 1 Agent 1 in background
-    asyncio.create_task(_run_analyzer_async(pipe, repo_url_or_path=(url if mode == "url" else str(src_path))))
-
-    # Redirect to run page (HTMX-friendly via HX-Redirect header, plus regular Location)
     target = f"/runs/{project}/{pipe.run_id}"
     return HTMLResponse(
         f'<div class="text-emerald-400 text-sm p-4">'
-        f'✅ Run created: <code>{project}/{pipe.run_id}</code> · Phase 1 Agent 1 启动中...<br>'
-        f'<a class="underline" href="{target}">→ 查看 run 进度</a></div>',
+        f'✅ Run created: <code>{project}/{pipe.run_id}</code> · '
+        f'{"clone" if mode == "url" else "copy"} 启动中...<br>'
+        f'<a class="underline" href="{target}">→ 跳转到 run 页面查看进度</a></div>',
         headers={"HX-Redirect": target, "Location": target},
     )
+
+
+async def _run_clone_and_analyze(pipe: Pipeline, url: str) -> None:
+    """Phase 1 entry for URL mode: stream-clone with progress, then analyze."""
+    await REGISTRY.mark_running(pipe.run_id, "phase1-clone")
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    repo_dir = pipe.run_dir / "repo"
+    progress_path = pipe.run_dir / "clone_progress.json"
+    try:
+        from ..tools.git_clone import clone_with_progress
+        pipe.log.info(f"clone (streaming) {url} → {repo_dir}")
+        exit_code, tail = await asyncio.to_thread(
+            clone_with_progress, url, repo_dir, progress_path, 600,
+        )
+        if exit_code != 0:
+            raise RuntimeError(
+                f"git clone exit {exit_code}. tail:\n{tail[-1500:]}"
+            )
+        pipe.record_asset("repo", repo_dir, verified=True, url=url, source="git_clone")
+    except Exception as e:
+        pipe.log.exception(f"clone failed: {e}")
+        pipe.bus.emit("asset_failed", agent="pipeline",
+                       name="repo", error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=1, agent="git-clone",
+                           error_type=type(e).__name__, error_text=str(e))
+        await REGISTRY.mark_done(pipe.run_id)
+        return
+    await REGISTRY.mark_done(pipe.run_id)
+    # Hand off to analyzer (it has its own mark_running/mark_done).
+    asyncio.create_task(_run_analyzer_async(pipe, repo_url_or_path=url))
+
+
+async def _run_localcopy_and_analyze(pipe: Pipeline, src_path: Path) -> None:
+    """Phase 1 entry for local mode: copytree, then analyze."""
+    import shutil
+    await REGISTRY.mark_running(pipe.run_id, "phase1-copy")
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    repo_dir = pipe.run_dir / "repo"
+    progress_path = pipe.run_dir / "clone_progress.json"
+    try:
+        # Mark as starting so UI shows a copying indicator
+        import json as _json, time as _time
+        progress_path.parent.mkdir(parents=True, exist_ok=True)
+        progress_path.write_text(_json.dumps({
+            "phase": "copying", "source_path": str(src_path),
+            "ts": _time.time(), "elapsed": 0,
+        }), encoding="utf-8")
+        pipe.log.info(f"copy {src_path} → {repo_dir}")
+        ignore = shutil.ignore_patterns(
+            ".git", ".venv", "venv", "node_modules", "__pycache__",
+            ".pytest_cache", "build", "dist", ".tox", ".mypy_cache",
+            ".idea", ".vscode", "*.pyc", "*.pyo",
+        )
+        t0 = _time.time()
+        await asyncio.to_thread(shutil.copytree, str(src_path), str(repo_dir),
+                                  ignore=ignore, dirs_exist_ok=False)
+        elapsed = round(_time.time() - t0, 1)
+        progress_path.write_text(_json.dumps({
+            "phase": "done", "source_path": str(src_path),
+            "ts": _time.time(), "elapsed": elapsed,
+        }), encoding="utf-8")
+        pipe.record_asset("repo", repo_dir, verified=True,
+                           source="local_copy", source_path=str(src_path))
+    except Exception as e:
+        pipe.log.exception(f"local copy failed: {e}")
+        pipe.bus.emit("asset_failed", agent="pipeline",
+                       name="repo", error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=1, agent="local-copy",
+                           error_type=type(e).__name__, error_text=str(e))
+        await REGISTRY.mark_done(pipe.run_id)
+        return
+    await REGISTRY.mark_done(pipe.run_id)
+    asyncio.create_task(_run_analyzer_async(pipe, repo_url_or_path=str(src_path)))
+
+
+async def _retry_clone_and_analyze(pipe: Pipeline) -> None:
+    """Retry the Phase-1 clone (when initial clone exit ≠ 0), then run analyzer."""
+    import shutil
+    url = pipe.state.repo_url
+    if not url:
+        pipe.record_error(phase=1, agent="git-clone",
+                           error_type="RuntimeError",
+                           error_text="no repo_url in state — cannot retry clone (delete this run and create a new one)")
+        return
+    # Wipe any partial repo + stale progress so the new attempt starts clean.
+    repo_dir = pipe.run_dir / "repo"
+    if repo_dir.exists():
+        shutil.rmtree(repo_dir, ignore_errors=True)
+    progress_path = pipe.run_dir / "clone_progress.json"
+    if progress_path.exists():
+        progress_path.unlink()
+    # Re-use the same streaming path used by the initial run.
+    await _run_clone_and_analyze(pipe, url=url)
 
 
 async def _run_analyzer_async(pipe: Pipeline, repo_url_or_path: str) -> None:
@@ -299,11 +396,14 @@ async def _run_analyzer_async(pipe: Pipeline, repo_url_or_path: str) -> None:
             progress_path=progress_path,
         )
         pipe.record_asset("project_brief", brief_path, verified=True)
+        _fire_quality_judge(pipe, "brief")
         pipe.transition(phase=1, gate="waiting_brief_approval")
     except Exception as e:
         pipe.log.exception(f"analyzer failed: {e}")
         pipe.bus.emit("asset_failed", agent="Agent 1 ProjectAnalyzer",
                       error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=1, agent="Agent 1 ProjectAnalyzer",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -317,6 +417,10 @@ async def view_run(project: str, run_id: str, request: Request):
     if state.phase == 1:
         briefs_dir = pipe.run_dir / "briefs"
         phase_ctx["versions"] = _load_brief_versions(briefs_dir)
+        # Distinguish clone phase from analyzer phase. Clone is "done" once
+        # `repo/.git/` exists (git's atomic finalization marker).
+        phase_ctx["clone_done"] = (pipe.run_dir / "repo" / ".git").exists()
+        phase_ctx["clone_progress_exists"] = (pipe.run_dir / "clone_progress.json").exists()
 
     # Phase 3/4/5 status (file existence + sizes)
     out_dir = pipe.run_dir / "outputs"
@@ -349,12 +453,89 @@ async def view_run(project: str, run_id: str, request: Request):
         "state": state,
         "phase_ctx": phase_ctx,
         "phase_label": _phase_label(state.phase),
-        "langfuse_url": "http://localhost:3000",
+        "phoenix_url": "http://localhost:6006",
         "agent_running": REGISTRY.is_running(run_id),
         "run_dir": str(pipe.run_dir),
         "phase3_state": phase3_state,
         "phase4_state": phase4_state,
         "phase5_state": phase5_state,
+    })
+
+
+@app.get("/runs/{project}/{run_id}/clone_panel", response_class=HTMLResponse)
+async def clone_panel(project: str, run_id: str, request: Request):
+    """Live clone-progress panel — polled by Phase 1 every 2s until clone done.
+
+    Once clone is done (repo/.git materialized), we emit `HX-Refresh: true`
+    so the parent page re-renders with `clone_done=True` and switches to
+    the briefs view automatically — no manual "next step" button needed.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    run_dir = pipe.run_dir
+    prog_path = run_dir / "clone_progress.json"
+    progress = None
+    if prog_path.exists():
+        try:
+            progress = json.loads(prog_path.read_text(encoding="utf-8"))
+        except Exception:
+            progress = {"phase": "unknown", "last_line": "(failed to read progress file)"}
+
+    headers = {}
+    # Trigger a full page refresh once the clone has materially completed.
+    # We check both the progress phase AND the actual .git directory to
+    # avoid a premature refresh if the JSON was updated but git is still
+    # finalizing pack files.
+    clone_done = (run_dir / "repo" / ".git").exists()
+    if clone_done:
+        headers["HX-Refresh"] = "true"
+
+    return TEMPLATES.TemplateResponse(request, "_phase_1_cloning.html", {
+        "project": project, "run_id": run_id,
+        "progress": progress,
+        "repo_url": pipe.state.repo_url,
+    }, headers=headers)
+
+
+@app.get("/runs/{project}/{run_id}/log_tail", response_class=HTMLResponse)
+async def log_tail(project: str, run_id: str, request: Request,
+                    n: int = 40, filter_agent: str = ""):
+    """Render the last N lines of pipeline.jsonl as readable HTML.
+
+    Used as an HTMX-polled component inside the cloning panel. Lines are
+    parsed from loguru JSONL and rendered with level color + monospace.
+    `filter_agent` (optional) keeps only entries matching `extra.agent`.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    log_path = pipe.run_dir / "logs" / "pipeline.jsonl"
+    n = max(1, min(int(n or 40), 200))
+    rows: list[dict] = []
+    if log_path.exists():
+        try:
+            # Read tail efficiently: read whole file (it's bounded to one run).
+            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for ln in lines[-n * 3:]:  # over-fetch in case of filter
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = json.loads(ln)
+                except Exception:
+                    continue
+                r = rec.get("record", {})
+                agent = r.get("extra", {}).get("agent", "")
+                if filter_agent and agent != filter_agent:
+                    continue
+                rows.append({
+                    "ts": r.get("time", {}).get("repr", "")[11:19],
+                    "level": r.get("level", {}).get("name", "INFO"),
+                    "agent": agent,
+                    "message": (r.get("message") or rec.get("text") or "").strip(),
+                })
+        except Exception:
+            pass
+    rows = rows[-n:]
+    return TEMPLATES.TemplateResponse(request, "_log_tail.html", {
+        "rows": rows, "n": n,
     })
 
 
@@ -472,41 +653,51 @@ async def iterate(project: str, run_id: str,
 
 @app.post("/runs/{project}/{run_id}/approve", response_class=HTMLResponse)
 async def approve(project: str, run_id: str, version: str = Form("")):
-    """For Phase 1: copy briefs/{version}.md → project_brief.md, then advance."""
+    """Approve the Phase 1 brief and advance to Phase 2.
+
+    PHASE 1 ONLY. Phase 2/3/4 have their own /accept_* routes with
+    artifact-existence guards so we can't accidentally skip recording or
+    Remotion render. Previously /approve blindly advanced any phase by 1,
+    which let users (or a polling double-submit race) jump to Phase 3
+    without test.mp4 — caught now with an explicit guard.
+    """
     pipe = REGISTRY.get_or_load(project, run_id)
 
-    if pipe.state.phase == 1:
-        if version not in ("standard", "deep"):
-            raise HTTPException(400, "version must be 'standard' or 'deep'")
-        briefs_dir = pipe.run_dir / "briefs"
-        chosen_md = briefs_dir / f"{version}.md"
-        chosen_meta = briefs_dir / f"{version}_meta.json"
-        if not chosen_md.exists():
-            raise HTTPException(400, f"briefs/{version}.md does not exist; "
-                                     f"generate it first")
-        # Copy chosen → canonical
-        canonical_md = pipe.run_dir / "project_brief.md"
-        canonical_meta = pipe.run_dir / "brief_sources.json"
-        canonical_md.write_text(chosen_md.read_text(encoding="utf-8"),
-                                encoding="utf-8")
-        if chosen_meta.exists():
-            canonical_meta.write_text(chosen_meta.read_text(encoding="utf-8"),
-                                      encoding="utf-8")
-        pipe.record_asset("project_brief", canonical_md, verified=True,
-                          version=version)
+    if pipe.state.phase != 1:
+        raise HTTPException(
+            400,
+            f"/approve is Phase-1 only. Current phase is {pipe.state.phase}; "
+            f"use the phase-specific accept route on the run page."
+        )
+
+    if version not in ("standard", "deep"):
+        raise HTTPException(400, "version must be 'standard' or 'deep'")
+    briefs_dir = pipe.run_dir / "briefs"
+    chosen_md = briefs_dir / f"{version}.md"
+    chosen_meta = briefs_dir / f"{version}_meta.json"
+    if not chosen_md.exists():
+        raise HTTPException(400, f"briefs/{version}.md does not exist; generate it first")
+    # Copy chosen → canonical
+    canonical_md = pipe.run_dir / "project_brief.md"
+    canonical_meta = pipe.run_dir / "brief_sources.json"
+    canonical_md.write_text(chosen_md.read_text(encoding="utf-8"),
+                            encoding="utf-8")
+    if chosen_meta.exists():
+        canonical_meta.write_text(chosen_meta.read_text(encoding="utf-8"),
+                                  encoding="utf-8")
+    pipe.record_asset("project_brief", canonical_md, verified=True,
+                      version=version)
 
     pipe.gate_pass(pipe.state.gate, version=version or None)
-    if pipe.state.phase < 5:
-        next_phase = pipe.state.phase + 1
-        pipe.transition(phase=next_phase, gate="running")
-    else:
-        pipe.transition(gate="done")
-    label = {"standard": "📄 标准版", "deep": "🔬 深度版"}.get(version, "")
+    pipe.transition(phase=2, gate="running")
+    target = f"/runs/{project}/{run_id}"
     return HTMLResponse(
         f'<div class="px-4 py-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 rounded">'
-        f'✅ Gate passed{(" · 选定" + label) if label else ""} → now phase {pipe.state.phase}, gate {pipe.state.gate}. '
-        f'<a href="/runs/{project}/{run_id}" class="underline">Reload</a> for next phase.'
-        f'</div>'
+        f'✅ Gate passed → phase {pipe.state.phase}（{pipe.state.gate}），跳转中...'
+        f'</div>',
+        # HX-Redirect tells the htmx client to do a full-page navigation
+        # right after the swap — no manual "Reload" click needed.
+        headers={"HX-Redirect": target, "Location": target},
     )
 
 
@@ -656,7 +847,6 @@ async def phase2_panel(project: str, run_id: str, request: Request):
             for w in ranked
         ]
         # Smart demo state (LLM-planned playwright recording with synced captions)
-        rec_dir = pipe.run_dir / "recordings"
         demo_script_path = rec_dir / "demo_script.json"
         demo_recording_path = rec_dir / "demo_recording.mp4"
         demo_timings_path = rec_dir / "demo_timings.json"
@@ -746,10 +936,14 @@ async def record_test(project: str, run_id: str,
 @app.post("/runs/{project}/{run_id}/accept_test", response_class=HTMLResponse)
 async def accept_test(project: str, run_id: str):
     pipe = REGISTRY.get_or_load(project, run_id)
+    if pipe.state.phase != 2:
+        raise HTTPException(400, f"accept_test requires phase=2, current={pipe.state.phase}")
     rec_dir = pipe.run_dir / "recordings"
     state_path = rec_dir / "test_state.json"
     if not state_path.exists():
         raise HTTPException(400, "no test recording to accept")
+    if not (rec_dir / "test.mp4").exists():
+        raise HTTPException(400, "recordings/test.mp4 missing — record first")
     state = json.loads(state_path.read_text(encoding="utf-8"))
     accepted = {
         "window_title": state.get("window_title"),
@@ -822,6 +1016,336 @@ async def execute_plan_handler(project: str, run_id: str):
     return HTMLResponse(
         '<div class="px-4 py-3 bg-amber-500/20 border border-amber-500/40 text-amber-200 rounded">'
         '⏳ 执行中：装依赖 → seed → 起服务 → health check'
+        '</div>',
+        headers=_PHASE2_REFRESH,
+    )
+
+
+@app.get("/runs/{project}/{run_id}/errors", response_class=HTMLResponse)
+async def errors_panel(project: str, run_id: str, request: Request):
+    """Show all error escalations + ErrorAgent suggestions pending review.
+
+    Each suggestion comes from <run_dir>/error_suggestions.jsonl (written by
+    ErrorAgent when an agent's LLM call retries are exhausted). User can
+    Apply / Reject / Mark as informational.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..agents.error_agent import read_pending_suggestions
+    from ..observability.error_log import read_errors
+    suggestions = read_pending_suggestions(pipe.run_dir)
+    recent_errors = read_errors(pipe.run_dir, limit=50)
+    return TEMPLATES.TemplateResponse(request, "errors.html", {
+        "project": project, "run_id": run_id,
+        "suggestions": suggestions,
+        "recent_errors": recent_errors,
+    })
+
+
+@app.post("/runs/{project}/{run_id}/errors/mark", response_class=HTMLResponse)
+async def errors_mark(project: str, run_id: str,
+                         ts: str = Form(...), status: str = Form(...)):
+    """Update a suggestion's status (applied / rejected / informational)."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    path = pipe.run_dir / "error_suggestions.jsonl"
+    if not path.exists():
+        return HTMLResponse('<div class="text-rose-300 text-xs">no suggestions file</div>', 404)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    updated = 0
+    for i, ln in enumerate(lines):
+        try:
+            rec = json.loads(ln)
+        except Exception:
+            continue
+        if rec.get("ts") == ts:
+            rec["status"] = status
+            rec["status_updated_at"] = datetime.now(timezone.utc).isoformat()
+            lines[i] = json.dumps(rec, ensure_ascii=False)
+            updated += 1
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    pipe.bus.emit("user_input", agent="error_review",
+                   action=status, suggestion_ts=ts)
+    return HTMLResponse(
+        f'<div class="text-emerald-300 text-xs">✓ marked {status} ({updated} record(s))</div>',
+        headers={"HX-Trigger": "errors-refresh"},
+    )
+
+
+@app.post("/runs/{project}/{run_id}/retry", response_class=HTMLResponse)
+async def retry_failed_phase(project: str, run_id: str):
+    """Re-fire the agent that recorded last_error.
+
+    The retry mapping is keyed by `last_error.agent` — no auto-fallback chains,
+    no thresholds, just user-clicked re-run of the same code with the same
+    persisted inputs. If the agent name isn't mapped (e.g. Phase 2b recording
+    needs window_title that wasn't persisted), we clear the error + redirect
+    so the user re-enters params manually.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    if pipe.state.last_error is None:
+        return HTMLResponse(
+            '<div class="text-rose-300 text-xs">没有可重试的错误</div>', 400,
+        )
+    err = pipe.state.last_error
+    agent = err.get("agent", "")
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+
+    # Auto-retry mapping for agents whose inputs are persisted on disk.
+    # Phase 2b recording / demo_planner / demo_driver / etc. need params that
+    # aren't recoverable, so they fall through to "manual" branch below.
+    auto: Optional[str] = None
+    if agent in ("git-clone", "local-copy"):
+        auto = "clone+analyze"
+    elif agent == "Agent 1 ProjectAnalyzer":
+        auto = "analyze"
+    elif agent == "Agent 2 SetupRunner":
+        auto = "planner"
+    elif agent == "Plan Executor":
+        auto = "execute_plan"
+    elif agent == "Agent 3 RemotionComposer":
+        auto = "phase3"
+    elif agent == "Agent 4 BGMComposer":
+        auto = "phase4"
+    elif agent == "Agent 5 VoiceOver":
+        auto = "phase5"
+
+    if auto is None:
+        pipe.clear_error()
+        pipe.transition(gate="running")
+        return HTMLResponse(
+            '<div class="text-amber-300 text-sm">'
+            'ℹ 这个 agent（' + agent + '）需要你手动重启动 — '
+            '错误已清除，请在下方面板里点回相应的按钮。</div>',
+            headers={"HX-Trigger": "retry-cleared"},
+        )
+
+    pipe.clear_error()
+    pipe.transition(gate="running")
+    pipe.log.info(f"user retry: {agent} → {auto}")
+
+    if auto == "clone+analyze":
+        asyncio.create_task(_retry_clone_and_analyze(pipe))
+    elif auto == "analyze":
+        asyncio.create_task(_run_analyzer_async(pipe, pipe.state.repo_url or ""))
+    elif auto == "planner":
+        asyncio.create_task(_run_planner_async(pipe, feedback=""))
+    elif auto == "execute_plan":
+        asyncio.create_task(_execute_plan_async(pipe))
+    elif auto == "phase3":
+        asyncio.create_task(_run_phase3_async(pipe))
+    elif auto == "phase4":
+        asyncio.create_task(_run_phase4_async(pipe))
+    elif auto == "phase5":
+        asyncio.create_task(_run_phase5_async(pipe, lang="zh-CN"))
+
+    return HTMLResponse(
+        f'<div class="text-emerald-300 text-sm">⏳ 重试 <code>{agent}</code> 启动中...</div>',
+        headers={"HX-Trigger": "retry-started"},
+    )
+
+
+@app.get("/runs/{project}/{run_id}/scores", response_class=HTMLResponse)
+async def scores_panel(project: str, run_id: str, request: Request):
+    """Show LLM-as-a-Judge scores per phase + final video user rating slot.
+
+    Auto scores live at <run_dir>/scores.jsonl (one record per judge call).
+    The final video rating is also written there with source='user'.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..tools.langfuse_score import read_local_scores
+
+    all_scores = read_local_scores(pipe.run_dir)
+
+    # Most-recent auto_judge per phase (deduped by phase)
+    phases_seen: set[str] = set()
+    auto_by_phase: list[dict] = []
+    for rec in all_scores:
+        if rec.get("source") != "auto_judge":
+            continue
+        ph = rec.get("phase")
+        if ph in phases_seen:
+            continue
+        phases_seen.add(ph)
+        auto_by_phase.append(rec)
+
+    # Most-recent user rating (final video)
+    user_rating = next((r for r in all_scores if r.get("source") == "user"), None)
+
+    # Find final video for the rating widget
+    final_zh = pipe.run_dir / "outputs" / "final_zh-CN.mp4"
+    final_en = pipe.run_dir / "outputs" / "final_en-US.mp4"
+    final_path = None
+    for cand in (final_zh, final_en):
+        if cand.exists():
+            final_path = cand.name
+            break
+
+    return TEMPLATES.TemplateResponse(request, "scores.html", {
+        "project": project, "run_id": run_id,
+        "auto_scores": auto_by_phase,
+        "user_rating": user_rating,
+        "final_video": final_path,
+        "raw_scores": all_scores[:20],
+    })
+
+
+@app.post("/runs/{project}/{run_id}/score_final", response_class=HTMLResponse)
+async def submit_final_rating(project: str, run_id: str,
+                                rating: float = Form(...),
+                                comment: str = Form("")):
+    """User submits a 1-5 star rating for the final video.
+
+    Distinct from the auto-judge — user rates the END artifact only. Stored
+    locally + pushed to Langfuse via record_user_video_rating().
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..agents.quality_judge import record_user_video_rating
+    try:
+        rec = record_user_video_rating(pipe.run_dir, rating, comment)
+    except ValueError as e:
+        return HTMLResponse(
+            f'<div class="text-rose-300 text-xs">{e}</div>', 400,
+        )
+    pipe.bus.emit("user_input", agent="user_rating",
+                   rating=rating, comment=comment[:200])
+    return HTMLResponse(
+        f'<div class="text-emerald-300 text-sm">'
+        f'✓ 已提交：{rating}/5 stars'
+        + (f'<br><span class="text-xs text-slate-400">{comment[:200]}</span>' if comment else '')
+        + '</div>',
+        headers={"HX-Trigger": "scores-refresh"},
+    )
+
+
+@app.post("/runs/{project}/{run_id}/score_rerun", response_class=HTMLResponse)
+async def rerun_judge(project: str, run_id: str, phase: str = Form(...)):
+    """Re-run auto-judge for one phase (useful after editing prompts)."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    if phase not in ("brief", "setup_plan", "cutting_plan", "voiceover_script"):
+        return HTMLResponse(
+            f'<div class="text-rose-300 text-xs">invalid phase: {phase}</div>', 400,
+        )
+    _fire_quality_judge(pipe, phase)
+    return HTMLResponse(
+        f'<div class="text-emerald-300 text-xs">⏳ re-judging {phase}… 刷新看结果</div>',
+    )
+
+
+@app.get("/runs/{project}/{run_id}/prompts", response_class=HTMLResponse)
+async def prompts_panel(project: str, run_id: str, request: Request):
+    """Show all agent SYSTEM_PROMPTs + per-run override editor.
+
+    Default prompts come from the agent modules. Overrides live at
+    `<run_dir>/prompts/<agent_key>.txt` — saved by the editor below.
+    Empty save = remove override.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..agents._prompt_override import list_overrides
+    from ..agents import project_analyzer, setup_runner, demo_driver, remotion_composer, voice_over
+
+    overrides = list_overrides(pipe.run_dir)
+
+    def _read_override(key: str) -> str:
+        p = pipe.run_dir / "prompts" / f"{key}.txt"
+        return p.read_text(encoding="utf-8") if p.exists() else ""
+
+    agents_info = [
+        {"key": "project_analyzer", "name": "Agent 1 · ProjectAnalyzer",
+         "phase": "Phase 1", "model": "LLM_REASONING (default: glm-5.1)",
+         "default_prompt": project_analyzer.SYSTEM_PROMPT_BASE + project_analyzer.DEEP_MODE_ADDENDUM,
+         "default_note": "Base + Deep-mode addendum (deep mode adds extra exploration instructions)",
+         "override": _read_override("project_analyzer"),
+         "has_override": overrides.get("project_analyzer", False)},
+        {"key": "setup_runner", "name": "Agent 2 · SetupRunner",
+         "phase": "Phase 2a",
+         "model": "LLM_REASONING",
+         "default_prompt": setup_runner.SYSTEM_PROMPT,
+         "default_note": "Drives check_tool / config_writes / install_commands / services.",
+         "override": _read_override("setup_runner"),
+         "has_override": overrides.get("setup_runner", False)},
+        {"key": "demo_driver", "name": "Agent · Demo Driver",
+         "phase": "Phase 2c",
+         "model": "LLM_VISION (default: kimi-k2.6) for web mode",
+         "default_prompt": demo_driver.SYSTEM_PROMPT,
+         "default_note": "Operates the running project (browser/CLI) + emits captions.",
+         "override": _read_override("demo_driver"),
+         "has_override": overrides.get("demo_driver", False)},
+        {"key": "remotion_composer", "name": "Agent 3 · RemotionComposer",
+         "phase": "Phase 3",
+         "model": "LLM_REASONING",
+         "default_prompt": remotion_composer.SYSTEM_PROMPT,
+         "default_note": "Drafts the cutting plan (5-8 scenes, 30-45s).",
+         "override": _read_override("remotion_composer"),
+         "has_override": overrides.get("remotion_composer", False)},
+        {"key": "voice_over", "name": "Agent 5 · VoiceOver",
+         "phase": "Phase 5",
+         "model": "LLM_REASONING",
+         "default_prompt": voice_over.SYSTEM_PROMPT,
+         "default_note": "Drafts bilingual voiceover script.",
+         "override": _read_override("voice_over"),
+         "has_override": overrides.get("voice_over", False)},
+    ]
+    return TEMPLATES.TemplateResponse(request, "prompts.html", {
+        "project": project, "run_id": run_id, "agents": agents_info,
+    })
+
+
+@app.post("/runs/{project}/{run_id}/prompts/{agent_key}", response_class=HTMLResponse)
+async def save_prompt_override(project: str, run_id: str, agent_key: str,
+                                  text: str = Form("")):
+    """Save (or clear) a per-run override for one agent's SYSTEM_PROMPT."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..agents._prompt_override import save_override
+    target = save_override(agent_key, text, pipe.run_dir)
+    if not text.strip():
+        return HTMLResponse(
+            f'<div class="text-xs text-slate-400 py-1">已删除 override，{agent_key} 下次跑用默认 prompt</div>')
+    pipe.log.info(f"prompt override saved: {agent_key} ({len(text)} chars)")
+    return HTMLResponse(
+        f'<div class="text-xs text-emerald-400 py-1">✓ 已保存 ({len(text)} chars)。{agent_key} 下次启动会用这个</div>')
+
+
+@app.post("/runs/{project}/{run_id}/provide_secrets", response_class=HTMLResponse)
+async def provide_secrets_handler(project: str, run_id: str, request: Request):
+    """User fills the user_secrets_needed form → write user_secrets.json, then
+    re-trigger execute_plan so it can pass the gate.
+
+    Form body: each declared `var_name` is a field. We accept whatever the
+    user typed (may be empty if they want to skip that secret; if a config_writes
+    template references it, executor will halt with a missing-var error which
+    surfaces back to them).
+    """
+    if REGISTRY.is_running(run_id):
+        raise HTTPException(409, "another action already running")
+    pipe = REGISTRY.get_or_load(project, run_id)
+    plan_path = pipe.run_dir / "setup_plan.json"
+    if not plan_path.exists():
+        raise HTTPException(400, "no setup_plan.json")
+
+    form = await request.form()
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    declared = {s["var_name"] for s in (plan.get("user_secrets_needed") or [])
+                if isinstance(s, dict) and s.get("var_name")}
+    secrets = {k: (v or "").strip() for k, v in form.items() if k in declared}
+
+    # Merge with existing (in case user is updating after a previous fill)
+    existing_path = pipe.run_dir / "user_secrets.json"
+    if existing_path.exists():
+        try:
+            existing = json.loads(existing_path.read_text(encoding="utf-8"))
+            secrets = {**existing, **secrets}
+        except Exception:
+            pass
+    existing_path.write_text(json.dumps(secrets, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+    pipe.bus.emit("user_input", agent="executor",
+                   action="provide_secrets", vars=list(secrets.keys()))
+    pipe.log.info(f"user provided {len(secrets)} secret(s): {list(secrets.keys())}")
+
+    # Re-trigger execution now that gate should pass.
+    asyncio.create_task(_execute_plan_async(pipe))
+    return HTMLResponse(
+        '<div class="px-4 py-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 rounded">'
+        f'✓ 已保存 {len(secrets)} 个密钥，继续执行 install / seed / 起服务…'
         '</div>',
         headers=_PHASE2_REFRESH,
     )
@@ -960,7 +1484,7 @@ async def status_chip(project: str, run_id: str):
 # Observability viewer · /runs/{project}/{run_id}/observability
 # ────────────────────────────────────────────────────────────
 
-def _read_events(run_dir: Path, limit: int = 500) -> list[dict]:
+def _read_events_recent(run_dir: Path, limit: int = 500) -> list[dict]:
     """Read events.jsonl, return last `limit` parsed entries."""
     p = run_dir / "events.jsonl"
     if not p.exists():
@@ -1051,7 +1575,7 @@ async def observability_global(request: Request):
     runs_data = []
     for r in _list_runs():
         run_dir = WORKSPACE_ROOT / r["project"] / "runs" / r["run_id"]
-        events = _read_events(run_dir, limit=10000)
+        events = _read_events_recent(run_dir, limit=10000)
         summary = _events_summary(events)
         log_files = _summarize_logs(run_dir)
         runs_data.append({
@@ -1067,14 +1591,14 @@ async def observability_global(request: Request):
         })
     return TEMPLATES.TemplateResponse(request, "observability_global.html", {
         "runs": runs_data,
-        "langfuse_url": "http://localhost:3000/",
+        "phoenix_url": "http://localhost:6006/",
     })
 
 
 @app.get("/runs/{project}/{run_id}/observability", response_class=HTMLResponse)
 async def observability_page(project: str, run_id: str, request: Request):
     pipe = REGISTRY.get_or_load(project, run_id)
-    events = _read_events(pipe.run_dir)
+    events = _read_events_recent(pipe.run_dir)
     summary = _events_summary(events)
     log_files = _summarize_logs(pipe.run_dir)
     return TEMPLATES.TemplateResponse(request, "observability.html", {
@@ -1082,7 +1606,7 @@ async def observability_page(project: str, run_id: str, request: Request):
         "events": events,
         "summary": summary,
         "log_files": log_files,
-        "langfuse_url": "http://localhost:3000/",
+        "phoenix_url": "http://localhost:6006/",
     })
 
 
@@ -1201,6 +1725,8 @@ async def _plan_demo_async(pipe: Pipeline, service_url: str, brief_path: Path) -
         pipe.log.exception(f"plan_demo failed: {e}")
         pipe.bus.emit("asset_failed", agent="demo_planner",
                       error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=2, agent="Demo Planner",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -1242,59 +1768,16 @@ async def _record_demo_async(pipe: Pipeline, script_path: Path) -> None:
         pipe.log.exception(f"record_demo failed: {e}")
         pipe.bus.emit("asset_failed", agent="demo_executor",
                       error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=2, agent="Demo Executor",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
 
-@app.post("/runs/{project}/{run_id}/accept_demo", response_class=HTMLResponse)
-async def accept_demo_route(project: str, run_id: str,
-                              with_captions: str = Form("none")):
-    """Finalize demo recording → recordings/test.mp4.
-
-    with_captions ∈ {"zh", "en", "none"}.
-    "zh"/"en" → ffmpeg burn-in. "none" → just rename/copy demo_recording.mp4.
-    """
-    pipe = REGISTRY.get_or_load(project, run_id)
-    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
-    rec_dir = pipe.run_dir / "recordings"
-    src = rec_dir / "demo_recording.mp4"
-    if not src.exists():
-        return HTMLResponse(
-            '<div class="text-rose-400 text-sm">demo_recording.mp4 不存在 — 先录</div>',
-            status_code=400,
-        )
-    target = rec_dir / "test.mp4"
-    try:
-        if with_captions in ("zh", "en"):
-            from ..tools.captions import burn_captions
-            srt = rec_dir / f"captions_{with_captions}.srt"
-            if not srt.exists():
-                return HTMLResponse(
-                    f'<div class="text-rose-400 text-sm">缺 {srt.name}</div>',
-                    status_code=400,
-                )
-            await asyncio.to_thread(burn_captions, src, srt, target, 28, 64)
-        else:
-            import shutil
-            await asyncio.to_thread(shutil.copy2, src, target)
-        pipe.record_asset("recording_test", target, verified=True,
-                          source="demo_executor",
-                          captions=with_captions)
-        pipe.bus.emit("asset_verified", agent="pipeline",
-                      name="recording_test", path=str(target),
-                      captions=with_captions)
-        pipe.transition(phase=3, gate="running")
-    except Exception as e:
-        pipe.log.exception(f"accept_demo failed: {e}")
-        return HTMLResponse(
-            f'<div class="text-rose-400 text-sm">accept_demo 失败: {type(e).__name__}: {e}</div>',
-            status_code=500,
-        )
-    label = {"zh": "中文字幕", "en": "English captions", "none": "无字幕"}[with_captions]
-    return HTMLResponse(
-        f'<div class="text-emerald-400 text-sm py-2">✅ 已采纳 ({label}) → recordings/test.mp4</div>',
-        headers={"HX-Trigger": "phase2-refresh"},
-    )
+# NOTE: legacy /accept_demo for demo_executor (with_captions burn-in) was here
+# before. Removed because it shadowed the new Demo-Driver /accept_demo route
+# below (FastAPI uses first-registered match). The new route at line ~1899
+# handles demo.mp4 → test.mp4 + advances to Phase 3.
 
 
 # ────────────────────────────────────────────────────────────
@@ -1309,9 +1792,188 @@ async def accept_demo_route(project: str, run_id: str,
 async def run_phase3_route(project: str, run_id: str):
     pipe = REGISTRY.get_or_load(project, run_id)
     set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    # Record start time so the panel can show "elapsed Xs" without parsing logs.
+    import time as _time
+    (pipe.run_dir / "phase3_started.txt").write_text(str(_time.time()), encoding="utf-8")
     asyncio.create_task(_run_phase3_async(pipe))
-    return HTMLResponse('<div class="text-amber-300 text-sm py-2">⏳ Phase 3 · cutting_plan + Remotion render（5-10min）...</div>',
-                          headers={"HX-Trigger": "phase3-refresh"})
+    return HTMLResponse(
+        '<div class="text-amber-300 text-sm py-2 px-3 bg-amber-500/10 border border-amber-500/30 rounded">'
+        '⏳ Phase 3 启动中 · 面板会自动刷新显示进度（~5-10min）'
+        '</div>',
+        headers={"HX-Trigger": "phase3-refresh"},
+    )
+
+
+@app.post("/runs/{project}/{run_id}/rewind_to_phase/{n}", response_class=HTMLResponse)
+async def rewind_to_phase(project: str, run_id: str, n: int):
+    """User-driven rewind: pull state.phase back to `n` (must be < current).
+
+    Use case: state advanced prematurely (e.g. before bug fix /approve blindly
+    bumped any phase, or a polling double-submit raced). User clicks rewind
+    on a phase-N panel that's missing prereqs → state.phase resets so they
+    can complete the missing step. NOT auto-rewind — user click only.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    if not (1 <= n < pipe.state.phase):
+        raise HTTPException(
+            400,
+            f"rewind target must be < current phase. Got n={n}, current={pipe.state.phase}",
+        )
+    prev = pipe.state.phase
+    pipe.state.last_error = None
+    pipe.transition(phase=n, gate="running")
+    pipe.log.info(f"user rewind: phase {prev} → {n}")
+    target = f"/runs/{project}/{run_id}"
+    return HTMLResponse(
+        f'<div class="text-amber-300 text-sm">↩ 已回退到 Phase {n} · 跳转中...</div>',
+        headers={"HX-Redirect": target, "Location": target},
+    )
+
+
+@app.get("/runs/{project}/{run_id}/view_phase/{n}", response_class=HTMLResponse)
+async def view_phase_readonly(project: str, run_id: str, n: int, request: Request):
+    """Read-only view of a past phase's artifacts.
+
+    Click a green P1..P{state.phase-1} dot in the header → land here. Pure
+    artifact display: brief / setup_plan / cutting_plan / v1.mp4 / final.mp4.
+    No buttons that mutate state. "← Back to live" returns to the live run.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    state = pipe.state
+    if not (1 <= n <= 5):
+        raise HTTPException(400, "phase must be 1-5")
+    if n > state.phase:
+        raise HTTPException(400, f"phase {n} not reached yet (current={state.phase})")
+
+    run_dir = pipe.run_dir
+    artifacts: dict = {}
+
+    if n == 1:
+        b = run_dir / "project_brief.md"
+        artifacts["brief_md"] = b.read_text(encoding="utf-8") if b.exists() else None
+        if artifacts["brief_md"]:
+            artifacts["brief_html"] = md_renderer.render(artifacts["brief_md"])
+        briefs_dir = run_dir / "briefs"
+        artifacts["versions"] = _load_brief_versions(briefs_dir) if briefs_dir.exists() else {}
+
+    elif n == 2:
+        sp = run_dir / "setup_plan.json"
+        if sp.exists():
+            try:
+                artifacts["setup_plan"] = json.loads(sp.read_text(encoding="utf-8"))
+            except Exception:
+                artifacts["setup_plan"] = None
+        se = run_dir / "setup_exec.json"
+        if se.exists():
+            try:
+                artifacts["setup_exec"] = json.loads(se.read_text(encoding="utf-8"))
+            except Exception:
+                artifacts["setup_exec"] = None
+        test_rec = run_dir / "recordings" / "test.mp4"
+        if test_rec.exists():
+            artifacts["test_recording_size_mb"] = round(test_rec.stat().st_size / 1024 / 1024, 2)
+        demo_rec = run_dir / "recordings" / "demo_recording.mp4"
+        if demo_rec.exists():
+            artifacts["demo_recording_size_mb"] = round(demo_rec.stat().st_size / 1024 / 1024, 2)
+        captions = run_dir / "demo_captions.jsonl"
+        if captions.exists():
+            artifacts["caption_count"] = len(
+                [l for l in captions.read_text(encoding="utf-8").splitlines() if l.strip()]
+            )
+
+    elif n == 3:
+        cp = run_dir / "cutting_plan.json"
+        if cp.exists():
+            try:
+                artifacts["cutting_plan"] = json.loads(cp.read_text(encoding="utf-8"))
+            except Exception:
+                artifacts["cutting_plan"] = None
+        v1 = run_dir / "outputs" / "v1.mp4"
+        if v1.exists():
+            artifacts["v1_size_mb"] = round(v1.stat().st_size / 1024 / 1024, 2)
+
+    elif n == 4:
+        v1bgm = run_dir / "outputs" / "v1_bgm_final.mp4"
+        if v1bgm.exists():
+            artifacts["v1_bgm_size_mb"] = round(v1bgm.stat().st_size / 1024 / 1024, 2)
+        bgm_dir = run_dir / "bgm"
+        if bgm_dir.exists():
+            artifacts["bgm_files"] = sorted(
+                f.name for f in bgm_dir.glob("*.wav")
+            )
+
+    elif n == 5:
+        final_zh = run_dir / "outputs" / "final_zh-CN.mp4"
+        final_en = run_dir / "outputs" / "final_en-US.mp4"
+        if final_zh.exists():
+            artifacts["final_zh_size_mb"] = round(final_zh.stat().st_size / 1024 / 1024, 2)
+        if final_en.exists():
+            artifacts["final_en_size_mb"] = round(final_en.stat().st_size / 1024 / 1024, 2)
+        vs = run_dir / "voice" / "voiceover_script_bilingual.json"
+        if vs.exists():
+            try:
+                artifacts["voiceover_script"] = json.loads(vs.read_text(encoding="utf-8"))
+            except Exception:
+                artifacts["voiceover_script"] = None
+
+    return TEMPLATES.TemplateResponse(request, "phase_readonly.html", {
+        "project": project, "run_id": run_id,
+        "phase_num": n, "state": state,
+        "artifacts": artifacts,
+        "phase_label": _phase_label(n),
+    })
+
+
+@app.get("/runs/{project}/{run_id}/phase3_panel", response_class=HTMLResponse)
+async def phase3_panel(project: str, run_id: str, request: Request):
+    """Live Phase-3 panel — polled every 3s by _phase_3.html.
+
+    Surfaces: is_running flag, progress.json (latest step), elapsed time
+    since phase3_started.txt, cutting_plan.json size, v1.mp4 existence/size.
+    Removes the user's "is it running or dead?" guesswork during the
+    multi-minute Remotion render.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    run_dir = pipe.run_dir
+    is_running = REGISTRY.is_running(run_id)
+    progress = None
+    p_path = run_dir / "progress.json"
+    if p_path.exists():
+        try:
+            progress = json.loads(p_path.read_text(encoding="utf-8"))
+        except Exception:
+            progress = None
+
+    started_at = None
+    started_path = run_dir / "phase3_started.txt"
+    if started_path.exists():
+        try:
+            started_at = float(started_path.read_text(encoding="utf-8").strip())
+        except Exception:
+            pass
+    import time as _time
+    elapsed_s = int(_time.time() - started_at) if started_at else None
+
+    cutting_plan = run_dir / "cutting_plan.json"
+    v1 = run_dir / "outputs" / "v1.mp4"
+    # Prereq from Phase 2 — Remotion render needs test.mp4 as the recording asset.
+    test_mp4 = run_dir / "recordings" / "test.mp4"
+    project_brief = run_dir / "project_brief.md"
+
+    return TEMPLATES.TemplateResponse(request, "_phase_3_panel.html", {
+        "project": project, "run_id": run_id,
+        "is_running": is_running,
+        "progress": progress,
+        "elapsed_s": elapsed_s,
+        "cutting_plan_exists": cutting_plan.exists(),
+        "cutting_plan_size_kb": (cutting_plan.stat().st_size // 1024) if cutting_plan.exists() else 0,
+        "v1_exists": v1.exists(),
+        "v1_size_mb": round(v1.stat().st_size / 1024 / 1024, 2) if v1.exists() else 0,
+        "last_error": pipe.state.last_error,
+        "state_gate": pipe.state.gate,
+        "test_mp4_exists": test_mp4.exists(),
+        "project_brief_exists": project_brief.exists(),
+    })
 
 
 async def _run_phase3_async(pipe: Pipeline) -> None:
@@ -1404,6 +2066,7 @@ async def _run_phase3_async(pipe: Pipeline) -> None:
             progress_path=run_dir / "progress.json",
         )
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        _fire_quality_judge(pipe, "cutting_plan")
 
         # M3b · codegen
         num, den = recording_meta["fps"].split("/")
@@ -1427,6 +2090,8 @@ async def _run_phase3_async(pipe: Pipeline) -> None:
     except Exception as e:
         pipe.log.exception(f"phase3 failed: {e}")
         pipe.bus.emit("asset_failed", agent="phase3", error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=3, agent="Agent 3 RemotionComposer",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -1434,6 +2099,11 @@ async def _run_phase3_async(pipe: Pipeline) -> None:
 @app.post("/runs/{project}/{run_id}/accept_phase3", response_class=HTMLResponse)
 async def accept_phase3(project: str, run_id: str):
     pipe = REGISTRY.get_or_load(project, run_id)
+    if pipe.state.phase != 3:
+        raise HTTPException(400, f"accept_phase3 requires phase=3, current={pipe.state.phase}")
+    v1 = pipe.run_dir / "outputs" / "v1.mp4"
+    if not v1.exists():
+        raise HTTPException(400, "outputs/v1.mp4 not produced yet — run Phase 3 first")
     pipe.transition(phase=4, gate="running")
     return HTMLResponse('<div class="text-emerald-400 text-sm">✅ Phase 3 通过 → Phase 4</div>',
                           headers={"HX-Trigger": "phase-refresh"})
@@ -1458,6 +2128,7 @@ async def _run_phase4_async(pipe: Pipeline) -> None:
         set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
         from ..tools.bgm_scaffold import generate_scaffold
         from ..tools.bgm_musicgen import generate_bgm, build_prompt_from_brief
+        from ..tools.bgm_minimax import generate_bgm_minimax, has_minimax_key
         from ..tools.bgm_mux import mux_bgm
         import tempfile
 
@@ -1469,19 +2140,33 @@ async def _run_phase4_async(pipe: Pipeline) -> None:
         scaffold = run_dir / "bgm" / "bgm_scaffold.wav"
         r1 = await asyncio.to_thread(generate_scaffold, plan, scaffold, 120)
 
-        # M4b · MusicGen (use local model dir to bypass HF cache issues)
-        local_model = str(Path(tempfile.gettempdir()) / "musicgen-small-local")
-        if Path(local_model).exists():
-            model_arg = local_model
-        else:
-            model_arg = "facebook/musicgen-small"
+        # M4b · BGM generation
+        # Prefer MiniMax music-2.6 (cloud, ~10-30s) over local MusicGen (CPU 5-10min).
+        # If MINIMAX_API_KEY missing or the call fails, fall back to local MusicGen.
         bgm_final = run_dir / "bgm" / "bgm_final.wav"
         prompt = build_prompt_from_brief(brief, bpm=120)
-        await asyncio.to_thread(
-            generate_bgm,
-            scaffold, bgm_final, prompt,
-            r1["duration_s"], model_arg, None, False,
-        )
+        used_minimax = False
+        if has_minimax_key():
+            try:
+                await asyncio.to_thread(
+                    generate_bgm_minimax,
+                    scaffold, bgm_final, prompt, r1["duration_s"],
+                )
+                used_minimax = True
+            except Exception as mm_err:
+                pipe.log.warning(f"MiniMax BGM failed, falling back to MusicGen: {mm_err}")
+
+        if not used_minimax:
+            local_model = str(Path(tempfile.gettempdir()) / "musicgen-small-local")
+            if Path(local_model).exists():
+                model_arg = local_model
+            else:
+                model_arg = "facebook/musicgen-small"
+            await asyncio.to_thread(
+                generate_bgm,
+                scaffold, bgm_final, prompt,
+                r1["duration_s"], model_arg, None, False,
+            )
 
         # M4c · mux
         v1 = run_dir / "outputs" / "v1.mp4"
@@ -1493,6 +2178,8 @@ async def _run_phase4_async(pipe: Pipeline) -> None:
     except Exception as e:
         pipe.log.exception(f"phase4 failed: {e}")
         pipe.bus.emit("asset_failed", agent="phase4", error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=4, agent="Agent 4 BGMComposer",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -1500,6 +2187,11 @@ async def _run_phase4_async(pipe: Pipeline) -> None:
 @app.post("/runs/{project}/{run_id}/accept_phase4", response_class=HTMLResponse)
 async def accept_phase4(project: str, run_id: str):
     pipe = REGISTRY.get_or_load(project, run_id)
+    if pipe.state.phase != 4:
+        raise HTTPException(400, f"accept_phase4 requires phase=4, current={pipe.state.phase}")
+    v1bgm = pipe.run_dir / "outputs" / "v1_bgm_final.mp4"
+    if not v1bgm.exists():
+        raise HTTPException(400, "outputs/v1_bgm_final.mp4 not produced yet — run Phase 4 first")
     pipe.transition(phase=5, gate="running")
     return HTMLResponse('<div class="text-emerald-400 text-sm">✅ Phase 4 通过 → Phase 5</div>',
                           headers={"HX-Trigger": "phase-refresh"})
@@ -1544,6 +2236,7 @@ async def _run_phase5_async(pipe: Pipeline, lang: str = "zh-CN") -> None:
         bilingual = voice_dir / "voiceover_script_bilingual.json"
         if not bilingual.exists():
             await asyncio.to_thread(propose_script, run_dir, brief, plan, bilingual)
+            _fire_quality_judge(pipe, "voiceover_script")
 
         per = voice_dir / f"voiceover_script_{lang}.json"
         seg_dir = voice_dir / f"per_segment_{lang}"
@@ -1578,6 +2271,8 @@ async def _run_phase5_async(pipe: Pipeline, lang: str = "zh-CN") -> None:
     except Exception as e:
         pipe.log.exception(f"phase5 failed: {e}")
         pipe.bus.emit("asset_failed", agent="phase5", error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=5, agent="Agent 5 VoiceOver",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -1653,6 +2348,8 @@ async def _record_cli_async(pipe: Pipeline, cmd: list, cwd: Path, duration_s: fl
         pipe.log.exception(f"record_cli failed: {e}")
         pipe.bus.emit("asset_failed", agent="cli_recorder",
                       error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=2, agent="CLI Recorder",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -1661,6 +2358,8 @@ async def _record_cli_async(pipe: Pipeline, cmd: list, cwd: Path, duration_s: fl
 async def accept_cli_route(project: str, run_id: str):
     """Accept cli_recording.mp4 → recordings/test.mp4."""
     pipe = REGISTRY.get_or_load(project, run_id)
+    if pipe.state.phase != 2:
+        raise HTTPException(400, f"accept_cli requires phase=2, current={pipe.state.phase}")
     set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
     rec_dir = pipe.run_dir / "recordings"
     src = rec_dir / "cli_recording.mp4"
@@ -1811,6 +2510,8 @@ async def _run_demo_driver_async(*, pipe: Pipeline, repo_dir: Path,
         pipe.log.exception(f"demo_driver failed: {e}")
         pipe.bus.emit("asset_failed", agent="demo_driver",
                        error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=2, agent="Demo Driver",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -1885,6 +2586,8 @@ async def demo_driver_feedback_log(project: str, run_id: str):
 async def accept_demo_route(project: str, run_id: str):
     """Accept Demo Driver's recordings/demo.mp4 → recordings/test.mp4 and advance to Phase 3."""
     pipe = REGISTRY.get_or_load(project, run_id)
+    if pipe.state.phase != 2:
+        raise HTTPException(400, f"accept_demo requires phase=2, current={pipe.state.phase}")
     set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
     rec_dir = pipe.run_dir / "recordings"
     src = rec_dir / "demo.mp4"
@@ -2154,10 +2857,14 @@ async def _run_planner_async(pipe: Pipeline, feedback: str) -> None:
             progress_path=progress_path,
         )
         pipe.record_asset("setup_plan", plan_path, verified=True)
+        _fire_quality_judge(pipe, "setup_plan")
+        pipe.transition(phase=2, gate="waiting_plan_approval")
     except Exception as e:
         pipe.log.exception(f"planner failed: {e}")
         pipe.bus.emit("asset_failed", agent="Agent 2 SetupRunner",
                       error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=2, agent="Agent 2 SetupRunner",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -2198,6 +2905,8 @@ async def _record_test_async(pipe: Pipeline, window_title: str, duration_s: floa
         pipe.log.exception(f"record_test failed: {e}")
         pipe.bus.emit("asset_failed", agent="pipeline",
                       error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=2, agent="Record Test",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -2228,6 +2937,8 @@ async def _execute_plan_async(pipe: Pipeline) -> None:
         pipe.log.exception(f"plan execution failed: {e}")
         pipe.bus.emit("asset_failed", agent="pipeline",
                       error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=2, agent="Plan Executor",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -2264,6 +2975,8 @@ async def _run_agent_for_phase(pipe: Pipeline, feedback: str,
         pipe.log.exception(f"agent failed: {e}")
         pipe.bus.emit("asset_failed", agent=f"phase{pipe.state.phase}",
                       error=str(e), error_type=type(e).__name__)
+        pipe.record_error(phase=pipe.state.phase, agent=f"phase{pipe.state.phase}-iterate",
+                           error_type=type(e).__name__, error_text=str(e))
     finally:
         await REGISTRY.mark_done(pipe.run_id)
 
@@ -2273,16 +2986,16 @@ async def _run_agent_for_phase(pipe: Pipeline, feedback: str,
 # ────────────────────────────────────────────────────────────
 
 def run_server(host: str = "127.0.0.1", port: int = 7860, reload: bool = False) -> None:
-    # Configure OTLP → Langfuse once for the server lifetime so all web-triggered
+    # Configure OTLP → Phoenix once for the server lifetime so all web-triggered
     # Agent runs export spans. Pipeline instances created via Registry use
     # launch_ui=False, which is now a no-op (already initialized) but the
     # Anthropic SDK auto-instrument was activated here, so their LLM calls
-    # still emit spans into Langfuse.
+    # still emit spans into Phoenix.
     if not reload:
-        from ..observability.tracer import langfuse_url
+        from ..observability.tracer import phoenix_url
         from ..observability.tracer import setup as setup_tracing
         setup_tracing(project_name="video-workflow-web", launch_ui=True)
-        print(f"Langfuse UI: {langfuse_url()}")
+        print(f"Phoenix UI: {phoenix_url()}")
     else:
         print("⚠ --reload mode skips OTLP setup (worker isolation). "
               "Restart without --reload to enable tracing.")

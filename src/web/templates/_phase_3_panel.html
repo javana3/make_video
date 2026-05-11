@@ -1,0 +1,140 @@
+{# Inner panel polled every 3s by _phase_3.html — shows live Phase 3 status
+   so the user is never blind to "is it running or stuck?". #}
+
+<div class="rounded-lg border border-amber-700/40 bg-amber-950/15 px-5 py-5 space-y-3">
+  <div class="flex items-baseline gap-2 flex-wrap">
+    <span class="text-base font-semibold text-amber-200">🎬 Phase 3 · Remotion 合成</span>
+    <span class="text-xs text-slate-500">cutting_plan.json + TSX render → v1.mp4</span>
+    <span class="ml-auto"></span>
+    {% if is_running %}
+    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs rounded">
+      <span class="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse"></span>
+      Agent running
+      {% if elapsed_s is not none %}· {{ elapsed_s }}s{% endif %}
+    </span>
+    {% elif v1_exists %}
+    <span class="px-2 py-0.5 bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs rounded">✓ done</span>
+    {% elif last_error %}
+    <span class="px-2 py-0.5 bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs rounded">⚠ 失败 — 看顶部 banner</span>
+    {% else %}
+    <span class="px-2 py-0.5 bg-slate-700/50 border border-slate-600 text-slate-400 text-xs rounded">idle</span>
+    {% endif %}
+  </div>
+
+  {# Step indicator: where in the pipeline are we right now #}
+  {% set step_chips = [
+    ("cutting_plan", "1. 规划 cutting_plan", cutting_plan_exists),
+    ("codegen",      "2. TSX 生成",          v1_exists or (cutting_plan_exists and is_running)),
+    ("npm_install",  "3. npm install",       v1_exists),
+    ("render",       "4. Remotion render",   v1_exists),
+  ] %}
+  <div class="flex items-center gap-1.5 flex-wrap">
+    {% for key, label, done in step_chips %}
+    <span class="px-2 py-0.5 rounded text-[10px] font-mono border
+      {% if done %}bg-emerald-500/15 border-emerald-500/30 text-emerald-300
+      {% elif is_running %}bg-amber-500/15 border-amber-500/30 text-amber-300
+      {% else %}bg-slate-800 border-slate-700 text-slate-500{% endif %}">
+      {% if done %}✓{% elif is_running %}▶{% else %}·{% endif %} {{ label }}
+    </span>
+    {% endfor %}
+  </div>
+
+  {# Latest progress detail (from progress.json — written by cutting_planner LLM loop) #}
+  {% if is_running and progress %}
+  <div class="rounded border border-slate-800 bg-slate-950/60 px-3 py-2 text-xs space-y-1">
+    {% if progress.get("phase") %}
+    <div><span class="text-slate-500">phase:</span> <span class="text-slate-200 font-mono">{{ progress.phase }}</span></div>
+    {% endif %}
+    {% if progress.get("step") %}
+    <div><span class="text-slate-500">step:</span> <span class="text-slate-200 font-mono">{{ progress.step }}{% if progress.get("max_steps") %}/{{ progress.max_steps }}{% endif %}</span></div>
+    {% endif %}
+    {% if progress.get("last_action") %}
+    <div><span class="text-slate-500">last:</span> <span class="text-slate-300">{{ progress.last_action }}</span></div>
+    {% endif %}
+    {% if progress.get("status") %}
+    <div><span class="text-slate-500">status:</span> <span class="text-slate-300">{{ progress.status }}</span></div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# Cutting plan artifact: tiny indicator once written #}
+  {% if cutting_plan_exists %}
+  <div class="text-xs text-slate-400">
+    📄 <code>cutting_plan.json</code> ({{ cutting_plan_size_kb }} KB)
+    {% if not v1_exists and is_running %}
+    <span class="text-amber-300 ml-2">→ codegen + npm install + render 进行中（这一段没有逐步进度，耐心等 5-8 min）</span>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# Idle state: show the run button — BUT only when prereqs are present.
+     If Phase 2 didn't produce test.mp4, refuse to even offer Phase 3 (otherwise
+     the agent immediately fails with "test.mp4 missing"). #}
+  {% if not is_running and not v1_exists %}
+    {% set missing = [] %}
+    {% if not test_mp4_exists %}{% set _ = missing.append("recordings/test.mp4") %}{% endif %}
+    {% if not project_brief_exists %}{% set _ = missing.append("project_brief.md") %}{% endif %}
+    {% if missing %}
+    <div class="rounded-lg border border-rose-700/50 bg-rose-950/30 px-4 py-3 space-y-2">
+      <div class="text-sm font-semibold text-rose-200">❌ 缺少 Phase 3 前置产物</div>
+      <div class="text-xs text-rose-300">
+        Phase 3 需要：
+        <ul class="list-disc list-inside mt-1 space-y-0.5">
+          {% for m in missing %}<li><code class="bg-black/40 px-1 rounded">{{ m }}</code></li>{% endfor %}
+        </ul>
+      </div>
+      <div class="text-xs text-rose-300/80">
+        请回到 Phase 2 完成录屏（test.mp4）后再过来跑 Phase 3。
+      </div>
+      <div class="flex gap-2 pt-1 flex-wrap">
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/rewind_to_phase/2"
+              hx-target="#action-result" hx-swap="innerHTML"
+              class="inline">
+          <button type="submit"
+                  class="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/50 text-rose-200 rounded text-xs font-semibold">
+            ↩ 回退到 Phase 2 完成录屏
+          </button>
+        </form>
+        <a href="/runs/{{ project }}/{{ run_id }}/view_phase/2"
+           class="px-3 py-1.5 bg-slate-700/40 hover:bg-slate-700 border border-slate-600 text-slate-300 rounded text-xs">
+          📖 先看 Phase 2 产物（只读）
+        </a>
+      </div>
+    </div>
+    {% else %}
+    <p class="text-sm text-slate-400">
+      Agent 3 读 brief + recording 元数据，规划 cutting_plan.json，生成 Remotion TSX，npm install + 渲染出 v1.mp4。
+      <span class="text-slate-500">~5-10 min（首次 npm install 占大头）</span>
+    </p>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase3" hx-target="#action-result" hx-swap="innerHTML">
+      <button type="submit"
+              class="px-4 py-2 bg-amber-600 hover:bg-amber-500 text-white text-sm rounded font-semibold">
+        🎬 跑 Phase 3
+      </button>
+    </form>
+    {% endif %}
+  {% endif %}
+
+  {# Done state: show player + accept/rerun buttons #}
+  {% if v1_exists %}
+  <div class="text-sm text-slate-300">
+    ✅ v1.mp4 渲染完成 <span class="text-xs text-slate-500 ml-2">{{ v1_size_mb }} MB</span>
+  </div>
+  <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/v1.mp4"
+         controls class="w-full max-h-[60vh] rounded border border-slate-700 bg-black"></video>
+  {% if state_gate != 'done' %}
+  <div class="flex gap-2 flex-wrap">
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_phase3" hx-target="#action-result" hx-swap="innerHTML">
+      <button type="submit" class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm rounded font-semibold">
+        ✓ 通过 → Phase 4
+      </button>
+    </form>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase3" hx-target="#action-result" hx-swap="innerHTML">
+      <button type="submit" class="px-3 py-2 bg-amber-700 hover:bg-amber-600 text-white text-sm rounded">
+        ↻ 重跑
+      </button>
+    </form>
+  </div>
+  {% endif %}
+  {% endif %}
+</div>

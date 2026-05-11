@@ -1,0 +1,23 @@
+{# Renders parsed pipeline.jsonl rows as a readable log table.
+   Each row: ts (HH:MM:SS), level (color-coded), agent (cyan), message. #}
+<div class="font-mono text-xs leading-relaxed">
+  {% if not rows %}
+  <div class="text-slate-500 text-center py-4">No log entries yet.</div>
+  {% else %}
+  {% for r in rows %}
+  {% set tone = {
+    "ERROR":   "text-rose-300",
+    "WARNING": "text-amber-300",
+    "INFO":    "text-slate-200",
+    "DEBUG":   "text-slate-500",
+    "SUCCESS": "text-emerald-300",
+  }.get(r.level, "text-slate-300") %}
+  <div class="flex items-baseline gap-2 py-0.5 hover:bg-slate-900/40 rounded px-1 -mx-1">
+    <span class="text-slate-600 shrink-0 w-16 select-none">{{ r.ts }}</span>
+    <span class="shrink-0 w-14 text-[10px] uppercase {{ tone }} font-semibold">{{ r.level }}</span>
+    <span class="shrink-0 text-cyan-400/70 truncate max-w-[10rem]" title="{{ r.agent }}">{{ r.agent }}</span>
+    <span class="{{ tone }} break-all">{{ r.message }}</span>
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>

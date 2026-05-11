@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Errors · {{ project }} / {{ run_id }}{% endblock %}
+
+{% block breadcrumb %}
+<span class="text-slate-500">/</span>
+<a href="/runs/{{ project }}/{{ run_id }}" class="text-slate-300 hover:text-emerald-400">{{ project }}</a>
+<span class="text-slate-500">/</span>
+<span class="font-mono text-xs text-slate-400">{{ run_id }}</span>
+<span class="text-slate-500">/</span>
+<span class="text-rose-300">🚨 Errors</span>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto space-y-5">
+
+  <div class="rounded-xl border border-slate-800 bg-slate-900/40 px-5 py-4">
+    <h1 class="text-xl font-semibold text-slate-100">🚨 Error Recovery</h1>
+    <p class="text-sm text-slate-400 mt-1">
+      任何 agent 的 LLM call 失败 3 次（1s/5s/15s 退避）后，ErrorAgent (minimax-m2.7)
+      会读取错误链 + 项目代码，给出建议。下面是当前**待审批**的建议。
+    </p>
+  </div>
+
+  <!-- Pending suggestions -->
+  <div class="rounded-xl border border-amber-700/40 bg-amber-950/15 overflow-hidden">
+    <div class="px-5 py-3 border-b border-amber-800/40 bg-amber-950/30 flex items-baseline gap-2">
+      <span class="text-base">⏳</span>
+      <span class="text-sm font-semibold text-amber-200">待审批建议</span>
+      <span class="ml-auto text-xs text-amber-400/60">{{ suggestions|length }} 条</span>
+    </div>
+
+    {% if not suggestions %}
+    <div class="px-5 py-8 text-center text-slate-500 text-sm">
+      暂无 ErrorAgent 建议。<br/>
+      <span class="text-xs">（当某个 agent 的 LLM call 3 次重试都失败时，会自动出现）</span>
+    </div>
+    {% endif %}
+
+    {% for s in suggestions %}
+    <div class="px-5 py-4 border-b border-slate-800 last:border-b-0 space-y-2">
+      <div class="flex items-baseline gap-2 flex-wrap">
+        <span class="text-sm font-semibold text-slate-100">{{ s.failed_agent }}</span>
+        <span class="text-xs text-slate-500">/</span>
+        <span class="text-xs text-slate-400">{{ s.step_label }}</span>
+        <span class="ml-auto text-xs text-slate-500">{{ s.ts[:19] }}</span>
+      </div>
+
+      <details class="text-xs">
+        <summary class="cursor-pointer text-slate-400 hover:text-slate-200">
+          🔻 Error chain ({{ s.error_chain_summary|length }} attempt(s))
+        </summary>
+        <div class="mt-2 space-y-1 ml-3">
+          {% for e in s.error_chain_summary %}
+          <div class="bg-slate-950/60 border border-slate-800 rounded px-2 py-1">
+            <code class="text-rose-300">{{ e.type }}</code>:
+            <span class="text-slate-300">{{ e.text }}</span>
+          </div>
+          {% endfor %}
+        </div>
+      </details>
+
+      <div class="rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-4 py-3 space-y-2">
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <span class="text-xs text-emerald-300 font-mono uppercase">{{ s.suggestion.action }}</span>
+          <span class="text-xs text-slate-500">confidence={{ '%.2f' % s.suggestion.confidence }}</span>
+        </div>
+        <p class="text-sm text-slate-200">{{ s.suggestion.reasoning }}</p>
+        <div class="text-sm text-slate-300 whitespace-pre-wrap leading-relaxed">
+          <span class="text-xs text-emerald-400">建议操作 →</span><br/>
+          {{ s.suggestion.user_action }}
+        </div>
+        {% if s.suggestion.related_files %}
+        <div class="text-xs text-slate-400">
+          <span class="text-slate-500">相关文件:</span>
+          {% for f in s.suggestion.related_files %}
+          <code class="bg-slate-900 px-1.5 py-0.5 rounded mr-1">{{ f }}</code>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Action buttons -->
+      <div class="flex items-center gap-2">
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/errors/mark"
+              hx-target="#mark-{{ loop.index }}"
+              hx-swap="innerHTML">
+          <input type="hidden" name="ts" value="{{ s.ts }}"/>
+          <input type="hidden" name="status" value="applied"/>
+          <button type="submit"
+                  class="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-200 rounded text-xs">
+            ✓ 已采纳
+          </button>
+        </form>
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/errors/mark"
+              hx-target="#mark-{{ loop.index }}"
+              hx-swap="innerHTML">
+          <input type="hidden" name="ts" value="{{ s.ts }}"/>
+          <input type="hidden" name="status" value="rejected"/>
+          <button type="submit"
+                  class="px-3 py-1 bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-rose-200 rounded text-xs">
+            ✗ 不采纳
+          </button>
+        </form>
+        <form hx-post="/runs/{{ project }}/{{ run_id }}/errors/mark"
+              hx-target="#mark-{{ loop.index }}"
+              hx-swap="innerHTML">
+          <input type="hidden" name="ts" value="{{ s.ts }}"/>
+          <input type="hidden" name="status" value="informational"/>
+          <button type="submit"
+                  class="px-3 py-1 bg-slate-700/40 hover:bg-slate-700/60 border border-slate-600 text-slate-300 rounded text-xs">
+            ℹ 只读
+          </button>
+        </form>
+        <div id="mark-{{ loop.index }}" class="ml-2"></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Recent errors raw log -->
+  <div class="rounded-xl border border-slate-800 bg-slate-900/40 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-800 bg-slate-950/40">
+      <h2 class="text-sm font-semibold text-slate-200">📜 Recent errors (raw log, last 50)</h2>
+    </div>
+    {% if not recent_errors %}
+    <div class="px-5 py-6 text-center text-slate-500 text-sm">
+      No errors recorded.
+    </div>
+    {% else %}
+    <div class="divide-y divide-slate-800 max-h-96 overflow-y-auto">
+      {% for e in recent_errors %}
+      <div class="px-4 py-2 text-xs">
+        <div class="flex items-baseline gap-2 flex-wrap">
+          <span class="text-slate-500 font-mono">{{ e.ts[11:19] }}</span>
+          <span class="text-slate-300">{{ e.agent }}</span>
+          <span class="text-slate-500">·</span>
+          <span class="text-slate-400">{{ e.step_label }}</span>
+          <span class="text-slate-500">·</span>
+          <span class="text-slate-400">attempt {{ e.attempt }}/{{ e.max_attempts }}</span>
+          {% if e.escalated %}
+          <span class="px-1.5 py-0.5 bg-rose-500/20 text-rose-300 rounded text-[10px]">ESCALATED</span>
+          {% endif %}
+        </div>
+        <div class="mt-1 text-slate-400 font-mono">
+          <code class="text-rose-300">{{ e.error_type }}</code>: {{ e.error_text[:300] }}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+</div>
+{% endblock %}

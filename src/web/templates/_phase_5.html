@@ -61,5 +61,38 @@
     </form>
     {% endif %}
   </div>
+
+  <!-- User rating widget — only shown when at least one final exists -->
+  <div class="border-t border-emerald-800/40 pt-3 mt-2">
+    <div class="text-sm text-amber-200 mb-2">
+      ⭐ 给最终视频打分（仅你能打）
+    </div>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/score_final"
+          hx-target="#phase5-rating-result"
+          hx-swap="innerHTML"
+          class="flex items-center gap-3 flex-wrap">
+      <div class="flex items-center gap-1">
+        {% for n in [1, 2, 3, 4, 5] %}
+        <label class="cursor-pointer">
+          <input type="radio" name="rating" value="{{ n }}" class="peer sr-only">
+          <span class="inline-block px-2.5 py-1 bg-slate-800 border border-slate-700 rounded
+                       hover:bg-amber-700/40 hover:border-amber-500
+                       peer-checked:bg-amber-500/30 peer-checked:border-amber-400">
+            {{ '⭐' * n }}
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+      <input type="text" name="comment" placeholder="评语（可选）"
+             class="flex-1 min-w-[200px] bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:border-amber-500"/>
+      <button type="submit"
+              class="px-3 py-1 bg-amber-500/30 hover:bg-amber-500/50 border border-amber-400/60 text-amber-100 rounded text-xs font-semibold">
+        提交评分
+      </button>
+      <a href="/runs/{{ project }}/{{ run_id }}/scores"
+         class="text-xs text-cyan-300 hover:text-cyan-200 underline">查看全部评分 →</a>
+      <div id="phase5-rating-result" class="basis-full"></div>
+    </form>
+  </div>
   {% endif %}
 </div>

@@ -116,6 +116,7 @@ Gate = Literal[
     'waiting_bgm_approval',
     'waiting_script_approval',
     'running', 'done',
+    'failed',
 ]
 
 
@@ -127,3 +128,5 @@ class PipelineState:
     gate: Gate = 'running'
     current_version: int = 0
     manifest: dict = field(default_factory=dict)
+    last_error: Optional[dict] = None
+    repo_url: Optional[str] = None

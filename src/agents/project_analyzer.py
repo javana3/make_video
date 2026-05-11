@@ -117,7 +117,15 @@ deep analysis — the host UI labels source-only-from-README as suspicious.
 """
 
 
-def _system_prompt(mode: Mode) -> str:
+def _system_prompt(mode: Mode, run_dir: Optional[Path] = None) -> str:
+    """Resolve effective system prompt. Per-run override (saved by web UI's
+    Prompts panel at <run_dir>/prompts/project_analyzer.txt) takes precedence
+    over the module default; mode affects only the default path.
+    """
+    if run_dir is not None:
+        from ._prompt_override import get_system_prompt
+        default = SYSTEM_PROMPT_BASE + (DEEP_MODE_ADDENDUM if mode == "deep" else "")
+        return get_system_prompt("project_analyzer", default, run_dir)
     if mode == "deep":
         return SYSTEM_PROMPT_BASE + DEEP_MODE_ADDENDUM
     return SYSTEM_PROMPT_BASE
@@ -345,12 +353,21 @@ def run_project_analyzer(repo_dir: Path,
     for step in range(max_steps):
         log.info(f"step {step+1}/{max_steps} → LLM")
         write_progress(step + 1, "→ LLM (waiting response)")
-        resp = client.messages.create(
-            model=model,
-            max_tokens=8192,
-            system=_system_prompt(mode),
-            tools=TOOLS,
-            messages=messages,
+        from .error_agent import llm_call_with_recovery
+        resp = llm_call_with_recovery(
+            lambda: client.messages.create(
+                model=model,
+                max_tokens=8192,
+                system=_system_prompt(mode, run_dir=output_path.parent),
+                tools=TOOLS,
+                messages=messages,
+            ),
+            run_dir=output_path.parent,
+            agent="project_analyzer",
+            step_label=f"step {step + 1} LLM call",
+            context_hint={"model": model, "step": step + 1, "max_steps": max_steps,
+                          "mode": mode, "input_msgs": len(messages)},
+            log=log,
         )
         if resp.stop_reason == "max_tokens":
             log.warning(f"step {step+1}: stop_reason=max_tokens "
@@ -444,6 +461,17 @@ def run_project_analyzer(repo_dir: Path,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     sources_path.write_text(
+        json.dumps(sources_meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # Also write into briefs/<mode>.md so the web UI's briefs_panel picks it up.
+    # The panel renders versioned files (standard.md / deep.md) for iterate workflow;
+    # the top-level project_brief.md is the canonical artifact for downstream phases.
+    briefs_dir = output_path.parent / "briefs"
+    briefs_dir.mkdir(parents=True, exist_ok=True)
+    (briefs_dir / f"{mode}.md").write_text(final_brief, encoding="utf-8")
+    (briefs_dir / f"{mode}_meta.json").write_text(
         json.dumps(sources_meta, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

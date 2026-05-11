@@ -108,6 +108,14 @@ class BrowserSession:
         self._n_actions = 0
         self.started_at_iso: Optional[str] = None
 
+        # Observability buffers — populated by page.on(...) listeners so the
+        # agent can later query JS console messages and HTTP failures via
+        # tools. Bounded to avoid unbounded memory growth on long sessions.
+        self._console_log: list[dict] = []
+        self._network_failures: list[dict] = []
+        self._page_errors: list[dict] = []
+        self._max_buffer = 500
+
         self.log = agent_logger("browser_session")
 
     # ─── lifecycle ─────────────────────────────────────────────────────
@@ -141,6 +149,94 @@ class BrowserSession:
         self._context.set_default_timeout(self.default_timeout_ms)
         self._page = self._context.new_page()
         self._page.on("dialog", lambda d: d.accept())
+
+        # Console messages: type ∈ {log, info, warning, error, debug, ...}.
+        def _on_console(msg):
+            try:
+                entry = {
+                    "ts_action": self._n_actions,
+                    "ts_iso": datetime.now(timezone.utc).isoformat(),
+                    "type": msg.type,
+                    "text": msg.text,
+                    "location": str(msg.location) if msg.location else None,
+                }
+            except Exception as e:
+                entry = {"ts_action": self._n_actions, "type": "log",
+                          "text": f"<console capture failed: {e}>"}
+            self._console_log.append(entry)
+            if len(self._console_log) > self._max_buffer:
+                self._console_log = self._console_log[-self._max_buffer:]
+        self._page.on("console", _on_console)
+
+        # Network responses: capture 4xx/5xx so agent can see failed XHR/fetch.
+        def _on_response(resp):
+            try:
+                status = resp.status
+                if status < 400:
+                    return
+                entry = {
+                    "ts_action": self._n_actions,
+                    "ts_iso": datetime.now(timezone.utc).isoformat(),
+                    "url": resp.url,
+                    "status": status,
+                    "method": resp.request.method,
+                    "request_url": resp.request.url,
+                }
+            except Exception as e:
+                entry = {"ts_action": self._n_actions,
+                          "url": "?", "status": -1, "method": "?",
+                          "error": str(e)}
+            self._network_failures.append(entry)
+            if len(self._network_failures) > self._max_buffer:
+                self._network_failures = self._network_failures[-self._max_buffer:]
+        self._page.on("response", _on_response)
+
+        # Uncaught JS exceptions (pageerror event).
+        def _on_pageerror(exc):
+            entry = {
+                "ts_action": self._n_actions,
+                "ts_iso": datetime.now(timezone.utc).isoformat(),
+                "message": str(exc),
+            }
+            self._page_errors.append(entry)
+            if len(self._page_errors) > self._max_buffer:
+                self._page_errors = self._page_errors[-self._max_buffer:]
+        self._page.on("pageerror", _on_pageerror)
+
+    # ─── observability getters (called by agent tools) ─────────────────
+    def console_log(self, level: Optional[str] = None, since_action: int = 0,
+                      limit: int = 100) -> list[dict]:
+        """Return buffered console messages, optionally filtered by level.
+
+        level: None (all) | 'error' | 'warning' | 'info' | 'log' | 'debug'.
+        since_action: only entries with ts_action >= this (use after a click
+                       to see new console output since then).
+        """
+        out = self._console_log
+        if level:
+            out = [e for e in out if e.get("type") == level]
+        if since_action > 0:
+            out = [e for e in out if e.get("ts_action", 0) >= since_action]
+        return out[-limit:]
+
+    def network_failures(self, since_action: int = 0,
+                            min_status: int = 400,
+                            limit: int = 100) -> list[dict]:
+        """Return buffered 4xx/5xx responses, optionally filtered."""
+        out = [e for e in self._network_failures
+               if e.get("status", 0) >= min_status
+               and e.get("ts_action", 0) >= since_action]
+        return out[-limit:]
+
+    def page_errors(self, since_action: int = 0, limit: int = 50) -> list[dict]:
+        """Return uncaught JS exceptions."""
+        out = [e for e in self._page_errors
+               if e.get("ts_action", 0) >= since_action]
+        return out[-limit:]
+
+    @property
+    def n_actions(self) -> int:
+        return self._n_actions
 
     # ─── agent-facing API ──────────────────────────────────────────────
     def goto(self, url: str, wait_until: str = "domcontentloaded",

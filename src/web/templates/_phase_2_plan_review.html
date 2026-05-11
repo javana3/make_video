@@ -19,25 +19,42 @@
     {% endif %}
   </div>
 
-  <!-- manual prereqs (if any) -->
+  <!-- manual prereqs (rare — only truly impossible to auto, e.g., GPU driver+reboot) -->
   {% if plan.manual_prereqs %}
   <div class="rounded-lg border border-rose-700/40 bg-rose-950/20 px-5 py-3">
-    <h3 class="text-sm font-semibold text-rose-300 mb-1">⚠ 需要你手动完成的前置</h3>
+    <h3 class="text-sm font-semibold text-rose-300 mb-1">⚠ 真无法自动完成的前置（极少见）</h3>
     <ul class="text-sm text-slate-300 list-disc ml-5">
       {% for p in plan.manual_prereqs %}<li>{{ p }}</li>{% endfor %}
     </ul>
   </div>
   {% endif %}
 
-  <!-- env vars -->
-  {% if plan.env_vars_needed %}
-  <div class="rounded-lg border border-purple-700/40 bg-purple-950/10 px-5 py-3">
-    <h3 class="text-sm font-semibold text-purple-300 mb-1">🔑 需要的环境变量</h3>
-    <div class="flex flex-wrap gap-1">
-      {% for v in plan.env_vars_needed %}
-      <code class="px-1.5 py-0.5 bg-slate-900 rounded text-purple-300 text-xs">{{ v }}</code>
+  <!-- user secrets (the ONE user touchpoint — they fill values) -->
+  {% if plan.user_secrets_needed %}
+  <div class="rounded-lg border border-purple-700/40 bg-purple-950/15 px-5 py-4">
+    <h3 class="text-sm font-semibold text-purple-300 mb-1">🔑 需要你提供的外部 secret</h3>
+    <p class="text-xs text-slate-400 mb-3">
+      这些是 agent 无法自己拿到的（你账号下的 API key、第三方服务凭证）。
+      只需填值，其它一切 agent 自动完成。
+    </p>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/provide_secrets"
+          hx-target="#action-result"
+          class="space-y-3">
+      {% for s in plan.user_secrets_needed %}
+      <div>
+        <label class="text-xs text-slate-400 font-mono">${{ '{' }}{{ s.var_name }}{{ '}' }}</label>
+        <p class="text-xs text-slate-300 mt-0.5">{{ s.description }}</p>
+        <p class="text-xs text-slate-500 italic mb-1">{{ s.why_needed }}</p>
+        <input type="password" name="{{ s.var_name }}"
+               placeholder="paste value here"
+               class="mt-0.5 w-full bg-slate-950 border border-purple-700/40 rounded px-3 py-1.5 text-sm text-slate-100 font-mono focus:border-purple-500 focus:outline-none"/>
+      </div>
       {% endfor %}
-    </div>
+      <button type="submit"
+              class="inline-flex items-center gap-2 px-4 py-2 bg-purple-500/20 hover:bg-purple-500/30 border border-purple-500/50 text-purple-200 rounded transition text-sm font-medium">
+        💾 保存 secret 并继续执行
+      </button>
+    </form>
   </div>
   {% endif %}
 

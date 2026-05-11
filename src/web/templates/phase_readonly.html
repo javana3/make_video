@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}📖 Phase {{ phase_num }} (只读) · {{ project }} / {{ run_id }}{% endblock %}
+
+{% block breadcrumb %}
+<span class="text-slate-500">/</span>
+<a href="/runs/{{ project }}/{{ run_id }}" class="text-slate-300 hover:text-emerald-400">{{ project }}</a>
+<span class="text-slate-500">/</span>
+<span class="font-mono text-xs text-slate-400">{{ run_id }}</span>
+<span class="text-slate-500">/</span>
+<span class="text-emerald-300">📖 Phase {{ phase_num }}</span>
+{% endblock %}
+
+{% block content %}
+<div class="max-w-5xl mx-auto space-y-5">
+
+  <!-- Read-only banner -->
+  <div class="rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-5 py-3 flex items-center gap-3 flex-wrap">
+    <span class="text-lg">📖</span>
+    <div>
+      <div class="text-sm font-semibold text-emerald-200">只读视图 · Phase {{ phase_num }} · {{ phase_label }}</div>
+      <div class="text-xs text-emerald-400/70 mt-0.5">已完成阶段的产物快照 · 无法修改、无法重跑</div>
+    </div>
+    <a href="/runs/{{ project }}/{{ run_id }}"
+       class="ml-auto px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 rounded text-sm">
+      ← 返回当前 Phase {{ state.phase }}
+    </a>
+  </div>
+
+  <!-- Mini phase chain (still navigable to other past phases) -->
+  <div class="flex items-center gap-1 text-xs">
+    <span class="text-slate-500 mr-1">跳到：</span>
+    {% for n in [1, 2, 3, 4, 5] %}
+    {% if n < state.phase %}
+      {% if n == phase_num %}
+      <span class="px-2 py-0.5 rounded bg-emerald-500/30 border border-emerald-500/60 text-emerald-200 font-mono">P{{ n }}</span>
+      {% else %}
+      <a href="/runs/{{ project }}/{{ run_id }}/view_phase/{{ n }}"
+         class="px-2 py-0.5 rounded border border-emerald-500/30 hover:bg-emerald-500/10 text-emerald-400 font-mono">P{{ n }}</a>
+      {% endif %}
+    {% elif n == state.phase %}
+      <a href="/runs/{{ project }}/{{ run_id }}"
+         class="px-2 py-0.5 rounded border border-amber-500/40 bg-amber-500/15 text-amber-300 font-mono">P{{ n }} (current)</a>
+    {% else %}
+      <span class="px-2 py-0.5 rounded border border-slate-800 text-slate-600 font-mono opacity-50">P{{ n }}</span>
+    {% endif %}
+    {% if not loop.last %}<span class="text-slate-700">→</span>{% endif %}
+    {% endfor %}
+  </div>
+
+  <!-- Phase-specific read-only content -->
+
+  {% if phase_num == 1 %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-800 bg-slate-950/40">
+      <h2 class="text-sm font-semibold text-slate-200">📄 project_brief.md</h2>
+    </div>
+    <div class="px-5 py-4">
+      {% if artifacts.brief_html %}
+      <article class="prose prose-invert prose-sm max-w-none">{{ artifacts.brief_html|safe }}</article>
+      {% else %}
+      <div class="text-sm text-slate-500">(no canonical brief)</div>
+      {% endif %}
+    </div>
+  </div>
+  {% if artifacts.versions %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-800 bg-slate-950/40">
+      <h2 class="text-sm font-semibold text-slate-200">📁 草稿版本 (briefs/)</h2>
+    </div>
+    <div class="px-5 py-4 space-y-3">
+      {% for mode, v in artifacts.versions.items() %}
+      <details class="rounded border border-slate-800 bg-slate-950/60">
+        <summary class="cursor-pointer px-3 py-2 text-sm text-slate-300">📄 {{ mode }}.md ({{ v.size_kb or '?' }} KB)</summary>
+        <div class="px-3 py-2 text-xs font-mono text-slate-400 whitespace-pre-wrap max-h-96 overflow-y-auto border-t border-slate-800">{{ v.text }}</div>
+      </details>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if phase_num == 2 %}
+  {% if artifacts.setup_plan %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-800 bg-slate-950/40">
+      <h2 class="text-sm font-semibold text-slate-200">📄 setup_plan.json</h2>
+    </div>
+    <pre class="px-5 py-3 text-xs font-mono text-slate-300 overflow-x-auto max-h-96 overflow-y-auto bg-black/30">{{ artifacts.setup_plan | tojson(indent=2) }}</pre>
+  </div>
+  {% endif %}
+  {% if artifacts.setup_exec %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-800 bg-slate-950/40">
+      <h2 class="text-sm font-semibold text-slate-200">⚙ setup_exec.json · 执行结果</h2>
+    </div>
+    <pre class="px-5 py-3 text-xs font-mono text-slate-300 overflow-x-auto max-h-96 overflow-y-auto bg-black/30">{{ artifacts.setup_exec | tojson(indent=2) }}</pre>
+  </div>
+  {% endif %}
+  {% if artifacts.test_recording_size_mb or artifacts.demo_recording_size_mb %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-5 py-4 space-y-3">
+    <h2 class="text-sm font-semibold text-slate-200">📹 录屏</h2>
+    {% if artifacts.test_recording_size_mb %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1">test.mp4 · {{ artifacts.test_recording_size_mb }} MB</div>
+      <video src="/runs/{{ project }}/{{ run_id }}/artifacts/recordings/test.mp4" controls class="w-full max-h-[50vh] rounded border border-slate-700 bg-black"></video>
+    </div>
+    {% endif %}
+    {% if artifacts.demo_recording_size_mb %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1">demo_recording.mp4 · {{ artifacts.demo_recording_size_mb }} MB</div>
+      <video src="/runs/{{ project }}/{{ run_id }}/artifacts/recordings/demo_recording.mp4" controls class="w-full max-h-[50vh] rounded border border-slate-700 bg-black"></video>
+    </div>
+    {% endif %}
+    {% if artifacts.caption_count %}
+    <div class="text-xs text-slate-400">📝 demo_captions.jsonl · {{ artifacts.caption_count }} 条字幕</div>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if phase_num == 3 %}
+  {% if artifacts.cutting_plan %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-800 bg-slate-950/40">
+      <h2 class="text-sm font-semibold text-slate-200">📄 cutting_plan.json</h2>
+    </div>
+    <pre class="px-5 py-3 text-xs font-mono text-slate-300 overflow-x-auto max-h-[60vh] overflow-y-auto bg-black/30">{{ artifacts.cutting_plan | tojson(indent=2) }}</pre>
+  </div>
+  {% endif %}
+  {% if artifacts.v1_size_mb %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-5 py-4">
+    <div class="text-xs text-slate-500 mb-2">🎬 v1.mp4 · {{ artifacts.v1_size_mb }} MB（无 BGM/voice）</div>
+    <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/v1.mp4" controls class="w-full max-h-[60vh] rounded border border-slate-700 bg-black"></video>
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if phase_num == 4 %}
+  {% if artifacts.v1_bgm_size_mb %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-5 py-4">
+    <div class="text-xs text-slate-500 mb-2">🎵 v1_bgm_final.mp4 · {{ artifacts.v1_bgm_size_mb }} MB</div>
+    <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/v1_bgm_final.mp4" controls class="w-full max-h-[60vh] rounded border border-slate-700 bg-black"></video>
+  </div>
+  {% endif %}
+  {% if artifacts.bgm_files %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-800 bg-slate-950/40">
+      <h2 class="text-sm font-semibold text-slate-200">🎼 BGM 源文件 (bgm/)</h2>
+    </div>
+    <ul class="px-5 py-3 text-xs text-slate-300 space-y-1">
+      {% for f in artifacts.bgm_files %}
+      <li>📄 <code>{{ f }}</code></li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if phase_num == 5 %}
+  {% if artifacts.final_zh_size_mb %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-5 py-4">
+    <div class="text-xs text-slate-500 mb-2">🎬 final_zh-CN.mp4 · {{ artifacts.final_zh_size_mb }} MB</div>
+    <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/final_zh-CN.mp4" controls class="w-full max-h-[60vh] rounded border border-slate-700 bg-black"></video>
+  </div>
+  {% endif %}
+  {% if artifacts.final_en_size_mb %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-5 py-4">
+    <div class="text-xs text-slate-500 mb-2">🎬 final_en-US.mp4 · {{ artifacts.final_en_size_mb }} MB</div>
+    <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/final_en-US.mp4" controls class="w-full max-h-[60vh] rounded border border-slate-700 bg-black"></video>
+  </div>
+  {% endif %}
+  {% if artifacts.voiceover_script %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 overflow-hidden">
+    <div class="px-5 py-3 border-b border-slate-800 bg-slate-950/40">
+      <h2 class="text-sm font-semibold text-slate-200">🗣 voice/voiceover_script_bilingual.json</h2>
+    </div>
+    <pre class="px-5 py-3 text-xs font-mono text-slate-300 overflow-x-auto max-h-[60vh] overflow-y-auto bg-black/30">{{ artifacts.voiceover_script | tojson(indent=2) }}</pre>
+  </div>
+  {% endif %}
+  {% endif %}
+
+  {% if not artifacts %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-5 py-12 text-center text-slate-500">
+    Phase {{ phase_num }} 的产物文件不存在（可能这个 run 在此阶段跳过了）
+  </div>
+  {% endif %}
+
+</div>
+{% endblock %}
