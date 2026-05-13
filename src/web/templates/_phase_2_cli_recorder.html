@@ -36,16 +36,14 @@
   <div class="flex gap-2 flex-wrap">
     <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_cli" hx-target="#action-result" hx-swap="innerHTML">
       <button type="submit"
-              class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded font-semibold"
-              hx-confirm="把 cli_recording.mp4 复制为 test.mp4？">
+              class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded font-semibold">
         ✓ 接受为 test.mp4
       </button>
     </form>
     <form hx-post="/runs/{{ project }}/{{ run_id }}/record_cli" hx-target="#action-result" hx-swap="innerHTML">
       <input type="hidden" name="duration_s" value="30"/>
       <button type="submit"
-              class="px-3 py-2 bg-amber-700 hover:bg-amber-600 text-white text-xs rounded font-semibold"
-              hx-confirm="重录覆盖？">
+              class="px-3 py-2 bg-amber-700 hover:bg-amber-600 text-white text-xs rounded font-semibold">
         ↻ 重录
       </button>
     </form>

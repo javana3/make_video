@@ -1151,7 +1151,7 @@ async def scores_panel(project: str, run_id: str, request: Request):
     The final video rating is also written there with source='user'.
     """
     pipe = REGISTRY.get_or_load(project, run_id)
-    from ..tools.langfuse_score import read_local_scores
+    from ..tools.score_log import read_local_scores
 
     all_scores = read_local_scores(pipe.run_dir)
 
@@ -1194,8 +1194,8 @@ async def submit_final_rating(project: str, run_id: str,
                                 comment: str = Form("")):
     """User submits a 1-5 star rating for the final video.
 
-    Distinct from the auto-judge — user rates the END artifact only. Stored
-    locally + pushed to Langfuse via record_user_video_rating().
+    Distinct from the auto-judge — user rates the END artifact only.
+    Stored via record_user_video_rating() in scores.jsonl; view on /scores.
     """
     pipe = REGISTRY.get_or_load(project, run_id)
     from ..agents.quality_judge import record_user_video_rating

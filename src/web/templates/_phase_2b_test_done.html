@@ -48,8 +48,7 @@
     </p>
     <div class="flex items-center gap-2">
       <form hx-post="/runs/{{ project }}/{{ run_id }}/reject_test"
-            hx-target="#action-result"
-            hx-confirm="确认丢弃这次录屏并重选窗口？">
+            hx-target="#action-result">
         <button type="submit"
                 class="px-4 py-2 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-rose-300 rounded transition text-sm">
           ✗ 重录（换窗口）

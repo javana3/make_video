@@ -125,16 +125,14 @@
                     class="px-3 py-2 bg-sky-700 hover:bg-sky-600 text-white text-xs rounded"
                     hx-post="/runs/{{ project }}/{{ run_id }}/opendesign/adopt"
                     hx-vals='{"as_role": "hero"}'
-                    hx-target="#adopt-result"
-                    hx-confirm="作为 Hero 嵌入：mp4 落到 hero/intro.mp4，仍走 Phase 3 Remotion 拼接。继续？">
+                    hx-target="#adopt-result">
               📌 采纳为 Hero
             </button>
             <button type="button"
                     class="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 text-white text-xs rounded"
                     hx-post="/runs/{{ project }}/{{ run_id }}/opendesign/adopt"
                     hx-vals='{"as_role": "final"}'
-                    hx-target="#adopt-result"
-                    hx-confirm="作为 Final：mp4 直接 → outputs/final.mp4，跳过 Phase 3/4/5。继续？">
+                    hx-target="#adopt-result">
               🎬 采纳为 Final
             </button>
           </div>

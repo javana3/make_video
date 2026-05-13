@@ -126,8 +126,7 @@
     <p class="text-xs text-slate-500">通过即开始执行（host 跑 install → seed → 起 services → health check）</p>
     <div class="flex items-center gap-2">
       <form hx-post="/runs/{{ project }}/{{ run_id }}/draft_plan"
-            hx-target="#action-result"
-            hx-confirm="重新生成会覆盖当前 plan，确认？">
+            hx-target="#action-result">
         <input type="hidden" name="feedback" value="" />
         <button type="submit"
                 class="px-3 py-2 bg-slate-700/40 hover:bg-slate-700/60 border border-slate-600 text-slate-300 rounded transition text-sm">
@@ -135,8 +134,7 @@
         </button>
       </form>
       <form hx-post="/runs/{{ project }}/{{ run_id }}/execute_plan"
-            hx-target="#action-result"
-            hx-confirm="确认执行该计划？host 会运行 install / seed / 起服务">
+            hx-target="#action-result">
         <button type="submit"
                 class="inline-flex items-center gap-2 px-5 py-2 bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/50 text-emerald-300 rounded transition font-medium">
           <span>✓</span><span>通过 → 执行</span>

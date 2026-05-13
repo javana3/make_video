@@ -1,6 +1,6 @@
 """@traced_agent decorator + traced_step context manager.
 
-Both produce OTEL spans visible in Langfuse UI. `@traced_agent` wraps an Agent
+Both produce OTEL spans visible in Phoenix UI. `@traced_agent` wraps an Agent
 entry point; `traced_step(...)` is for instrumenting an inner step (e.g.
 "MusicGen.from_pretrained") so its duration shows nested under the agent span.
 """

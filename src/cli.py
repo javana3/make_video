@@ -229,7 +229,7 @@ def main() -> int:
     pa.add_argument("--mode", choices=["standard", "deep"], default="standard",
                     help="standard = README + key docs; deep = read source files too")
     pa.add_argument("--no-observability", action="store_true",
-                    help="Skip OTLP tracing setup (Langfuse export)")
+                    help="Skip OTLP tracing setup (Phoenix export)")
     pa.set_defaults(func=cmd_analyze)
 
     ps = sub.add_parser("serve", help="Launch the Web UI (FastAPI + HTMX)")

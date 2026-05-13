@@ -13,8 +13,12 @@ to rate manually via the UI (1-5 stars).
 Each judge call:
   - Reads the artifact + project context
   - Single LLM call (no tool use loop) returning a structured score
-  - Saves to <run_dir>/scores.jsonl
-  - Pushes to Langfuse via REST so it shows on the trace
+  - Saves to <run_dir>/scores.jsonl (source of truth)
+
+The judge itself emits an OTEL span (via @traced_agent) so it shows up
+in Phoenix UI alongside the agent it's judging, but the score values
+live in scores.jsonl + the project's /scores page — Phoenix has no
+simple "attach score to most-recent trace by name" endpoint.
 
 Model default: LLM_REASONING (glm-5.1). User can override per-phase via
 the standard prompt override mechanism (key = quality_judge_<phase>).
@@ -29,9 +33,7 @@ from typing import Any, Optional
 from ..observability.audit import traced_agent
 from ..observability.logger import agent_logger
 from ..tools.llm import anthropic_client, model_for
-from ..tools.langfuse_score import (
-    push_score, find_latest_trace_id, save_local_score,
-)
+from ..tools.score_log import save_local_score
 
 
 # Per-phase criteria. Each phase has its own rubric.
@@ -46,7 +48,6 @@ _RUBRICS = {
         ],
         "artifact_path": "project_brief.md",
         "artifact_kind": "markdown",
-        "trace_name": "Agent 1 ProjectAnalyzer",
     },
     "setup_plan": {
         "criteria": [
@@ -59,7 +60,6 @@ _RUBRICS = {
         ],
         "artifact_path": "setup_plan.json",
         "artifact_kind": "json",
-        "trace_name": "Agent 2 SetupRunner · plan",
     },
     "cutting_plan": {
         "criteria": [
@@ -72,7 +72,6 @@ _RUBRICS = {
         ],
         "artifact_path": "cutting_plan.json",
         "artifact_kind": "json",
-        "trace_name": "Agent 3 RemotionComposer · plan",
     },
     "voiceover_script": {
         "criteria": [
@@ -84,7 +83,6 @@ _RUBRICS = {
         ],
         "artifact_path": "voice/voiceover_script_bilingual.json",
         "artifact_kind": "json",
-        "trace_name": "Agent 5 Voice · Step1 Script",
     },
 }
 
@@ -227,38 +225,18 @@ def score_phase(phase: str, run_dir: Path) -> Optional[dict]:
         "source": "auto_judge",
     }
     save_local_score(run_dir, record)
-
-    # Push to Langfuse — find the trace by name, then score it
-    trace_id = find_latest_trace_id(rubric["trace_name"])
-    if trace_id:
-        ok, msg = push_score(
-            trace_id=trace_id,
-            name=f"{phase}_overall",
-            value=overall,
-            comment=f"{comment}\n\nbreakdown: {json.dumps(breakdown, ensure_ascii=False)}",
-        )
-        log.info(f"push overall → {ok} ({msg})")
-        for k, v in breakdown.items():
-            try:
-                v_num = float(v)
-            except (TypeError, ValueError):
-                continue
-            push_score(
-                trace_id=trace_id, name=f"{phase}_{k}", value=v_num,
-            )
-    else:
-        log.warning(f"no Langfuse trace found for {rubric['trace_name']}; scores saved locally only")
-
+    log.info(f"saved score → scores.jsonl (overall={overall}/10)")
     return record
 
 
 @traced_agent("Final Video Rating · user", phase=0)
 def record_user_video_rating(run_dir: Path, rating: float,
                                  comment: str = "") -> dict:
-    """User's 1-5 star rating of the final v1_bgm_voice_final.mp4.
+    """User's 1-5 star rating of the final video.
 
     Called from the web UI when the user clicks a star. Distinct from
-    auto_judge — source='user'. Saved locally + pushed to Langfuse.
+    auto_judge — source='user'. Saved to scores.jsonl (the /scores page
+    is the canonical viewer).
     """
     log = agent_logger("quality_judge")
     if not (1.0 <= rating <= 5.0):
@@ -271,16 +249,5 @@ def record_user_video_rating(run_dir: Path, rating: float,
         "source": "user",
     }
     save_local_score(run_dir, record)
-
-    # Push to Langfuse — try to find the phase 5 final-step trace (ducking + mux)
-    trace_id = (find_latest_trace_id("Agent 5 Voice · Step4 Ducking + Mux")
-                 or find_latest_trace_id("Agent 5 Voice · Step1 Script")
-                 or find_latest_trace_id("Agent 3 RemotionComposer · render"))
-    ok, msg = push_score(
-        trace_id=trace_id,
-        name="final_video_user_rating",
-        value=rating,
-        comment=comment,
-    )
-    log.info(f"user rating={rating} push→{ok} ({msg})")
+    log.info(f"user rating={rating}/5 saved → scores.jsonl")
     return record

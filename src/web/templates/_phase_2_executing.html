@@ -108,14 +108,12 @@ hx-get="/runs/{{ project }}/{{ run_id }}/phase2_panel" hx-trigger="every 2s" hx-
   <div class="rounded-lg border border-emerald-700/40 bg-emerald-950/20 px-5 py-4 flex items-center justify-between flex-wrap gap-2">
     <p class="text-sm text-emerald-300">M2a 完成 · 服务运行中。下一步是 M2b 录屏。</p>
     <div class="flex items-center gap-2">
-      <form hx-post="/runs/{{ project }}/{{ run_id }}/restart_services" hx-target="#action-result"
-            hx-confirm="重新跑 install / seed / 起服务（电脑重启或服务挂了的时候用）">
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/restart_services" hx-target="#action-result">
         <button class="px-3 py-2 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-amber-300 rounded text-sm">
           🔄 重启服务
         </button>
       </form>
-      <form hx-post="/runs/{{ project }}/{{ run_id }}/stop_services" hx-target="#action-result"
-            hx-confirm="停止所有服务？录屏阶段需要它们运行">
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/stop_services" hx-target="#action-result">
         <button class="px-3 py-2 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/40 text-rose-300 rounded text-sm">
           ⏹ 停止服务
         </button>

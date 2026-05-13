@@ -101,16 +101,14 @@
         <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_demo" hx-target="#action-result" hx-swap="innerHTML">
           <input type="hidden" name="with_captions" value="zh"/>
           <button type="submit"
-                  class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded font-semibold"
-                  hx-confirm="将 demo_recording.mp4 + 中文字幕 烧成 test.mp4？">
+                  class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs rounded font-semibold">
             ✓ 接受 + 中文字幕
           </button>
         </form>
         <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_demo" hx-target="#action-result" hx-swap="innerHTML">
           <input type="hidden" name="with_captions" value="en"/>
           <button type="submit"
-                  class="px-3 py-2 bg-sky-600 hover:bg-sky-500 text-white text-xs rounded font-semibold"
-                  hx-confirm="将 demo_recording.mp4 + English captions 烧成 test.mp4？">
+                  class="px-3 py-2 bg-sky-600 hover:bg-sky-500 text-white text-xs rounded font-semibold">
             ✓ Accept + EN captions
           </button>
         </form>
@@ -123,15 +121,13 @@
         </form>
         <form hx-post="/runs/{{ project }}/{{ run_id }}/record_demo" hx-target="#action-result" hx-swap="innerHTML">
           <button type="submit"
-                  class="px-3 py-2 bg-amber-700 hover:bg-amber-600 text-white text-xs rounded font-semibold"
-                  hx-confirm="按当前 demo_script 重录一次（覆盖 demo_recording.mp4）？">
+                  class="px-3 py-2 bg-amber-700 hover:bg-amber-600 text-white text-xs rounded font-semibold">
             ↻ 重录
           </button>
         </form>
         <form hx-post="/runs/{{ project }}/{{ run_id }}/plan_demo" hx-target="#action-result" hx-swap="innerHTML">
           <button type="submit"
-                  class="px-3 py-2 bg-rose-700 hover:bg-rose-600 text-white text-xs rounded font-semibold"
-                  hx-confirm="重新让 LLM 规划 demo_script（覆盖现 script + 录屏）？">
+                  class="px-3 py-2 bg-rose-700 hover:bg-rose-600 text-white text-xs rounded font-semibold">
             ↻ 重新规划
           </button>
         </form>

@@ -6,7 +6,7 @@ exported to the self-hosted Phoenix instance running at
 http://localhost:6006 by default.
 
 Phoenix is fully open-source (Elastic License 2.0, no feature gates on
-self-hosted). Unlike Langfuse, Phoenix routes spans to per-project views
+self-hosted). Phoenix routes spans to per-project views
 using the OpenInference `openinference.project.name` attribute — so each
 pipeline run automatically gets its own Phoenix project (just emit spans
 with that attribute set to `<project>-<run_id>`; Phoenix auto-creates the
@@ -149,7 +149,3 @@ def phoenix_url() -> Optional[str]:
     return _PHOENIX_HOST or _DEFAULT_HOST
 
 
-# Back-compat alias for callers still importing langfuse_url. Returns the
-# Phoenix URL; if anything still routes UI links there it will land on the
-# new Phoenix UI rather than 404.
-langfuse_url = phoenix_url
