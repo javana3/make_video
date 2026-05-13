@@ -76,6 +76,22 @@ class Pipeline:
             self.state.gate = gate
             self.bus.emit("gate_enter", agent="pipeline",
                           gate=gate, prev_gate=prev_gate)
+        # Per-phase timer files for the deterministic-metrics collector.
+        # Stamp started.txt on first entry to any phase (file not yet
+        # present), and finished.txt for the previous phase whenever the
+        # phase number actually changes. Gate-only transitions (e.g.,
+        # running → waiting_*) don't touch timer files.
+        from time import time as _now
+        cur_phase = self.state.phase
+        try:
+            started = self.run_dir / f"phase{cur_phase}_started.txt"
+            if not started.exists():
+                started.write_text(str(_now()), encoding="utf-8")
+            if phase is not None and phase != prev_phase and prev_phase:
+                finished = self.run_dir / f"phase{prev_phase}_finished.txt"
+                finished.write_text(str(_now()), encoding="utf-8")
+        except Exception:
+            pass
         self.save()
         self.log.info(
             f"transition: phase {prev_phase}→{self.state.phase}, "

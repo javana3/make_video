@@ -84,7 +84,54 @@ _RUBRICS = {
         "artifact_path": "voice/voiceover_script_bilingual.json",
         "artifact_kind": "json",
     },
+    "demo_captions": {
+        "criteria": [
+            "accuracy        — caption text matches what's happening on-screen at that timestamp",
+            "pacing          — captions appear at a natural reading rhythm, not crammed or sparse",
+            "informativeness — captions explain WHY this UI step matters, not just describe pixels",
+            "narrative_arc   — captions form a coherent demo story (hook → action → payoff)",
+            "concision       — each caption stays short enough to read in its on-screen window",
+        ],
+        "artifact_path": "demo_captions.jsonl",
+        "artifact_kind": "jsonl",
+    },
+    "voiceover_zh": {
+        "criteria": [
+            "naturalness    — sounds like a native Chinese speaker, not translated",
+            "rhythm         — each cue reads naturally in ≈12 字/秒 with breath room",
+            "tone_promo     — confident promo tone, no flat narration",
+            "term_choice    — technical terms localized correctly (e.g., 框架 vs framework)",
+            "duration_fit   — each cue's character count fits its t_end - t_start window",
+        ],
+        "artifact_path": "voice/voiceover_script_zh-CN.json",
+        "artifact_kind": "json",
+    },
+    "voiceover_en": {
+        "criteria": [
+            "naturalness    — reads like a native English copywriter, not translated-from-Chinese",
+            "rhythm         — each cue at ≈15 chars/sec with natural cadence",
+            "tone_promo     — confident promo voice; avoid corporate-speak",
+            "term_choice    — technical terms idiomatic (e.g., 'one-click' vs '一键')",
+            "duration_fit   — each cue's word count fits its t_end - t_start window",
+        ],
+        "artifact_path": "voice/voiceover_script_en-US.json",
+        "artifact_kind": "json",
+    },
 }
+
+
+# Cross-phase consistency judge — separate from per-phase rubrics. Reads
+# ALL prior artifacts and rates how well the project's narrative survives
+# the brief → setup → cutting_plan → voiceover chain. This is what catches
+# "Phase 1 promised feature X but Phase 5 voiceover never mentions it".
+_CROSS_PHASE_CRITERIA = [
+    "core_message      — brief's top 3 unique selling points each appear (named or paraphrased) in cutting_plan scene text AND voiceover_script",
+    "visual_keywords   — brief's visual keywords (color/style/mood) reflected in cutting_plan scene asset choices + on-screen text styling",
+    "audience_fit      — brief's target audience drives cutting_plan tone + voiceover language complexity (technical vs accessible)",
+    "factuality_chain  — stack/tools auto-detected in setup_plan appear accurately in cutting_plan captions (no invented tech)",
+    "scope_coherence   — cutting_plan total_duration ≈ 30-45s, voiceover cue count aligns with scene count, no scenes left silent",
+    "competitive_diff  — brief's '独特卖点' / vs-competitor framing surfaces in at least one voiceover cue or scene caption",
+]
 
 
 SYSTEM_PROMPT_TEMPLATE = """You are QualityJudge — an LLM-as-a-Judge evaluating one
@@ -226,6 +273,100 @@ def score_phase(phase: str, run_dir: Path) -> Optional[dict]:
     }
     save_local_score(run_dir, record)
     log.info(f"saved score → scores.jsonl (overall={overall}/10)")
+    return record
+
+
+@traced_agent("Quality Judge · cross-phase consistency", phase=0)
+def score_cross_phase_consistency(run_dir: Path) -> Optional[dict]:
+    """Cross-phase consistency judge.
+
+    Reads ALL prior artifacts (brief / setup_plan / cutting_plan / voiceover)
+    in one LLM call and rates how well the project's narrative survives
+    the chain. This catches "Phase 1 promised feature X but Phase 5
+    voiceover never mentions it" — the kind of drop-the-ball that per-phase
+    rubrics miss because each only sees its own artifact.
+
+    Should be fired AFTER all 4 source artifacts exist (post Phase 5).
+    """
+    log = agent_logger("quality_judge")
+
+    brief_p = run_dir / "project_brief.md"
+    setup_p = run_dir / "setup_plan.json"
+    cutting_p = run_dir / "cutting_plan.json"
+    voice_p = run_dir / "voice" / "voiceover_script_bilingual.json"
+
+    missing = [str(p.name) for p in (brief_p, setup_p, cutting_p, voice_p) if not p.exists()]
+    if missing:
+        log.warning(f"cross-phase judge skipped; missing artifacts: {missing}")
+        return None
+
+    rubric_text = "\n".join(f"  - {c}" for c in _CROSS_PHASE_CRITERIA)
+    system = (
+        "You are QualityJudge evaluating CROSS-PHASE consistency of a promo-video "
+        "pipeline. You'll see 4 artifacts produced by 4 different agents: a "
+        "project brief, a setup plan, a cutting (video edit) plan, and a "
+        "bilingual voiceover script. Your job is to rate how well the project's "
+        "narrative is preserved across the chain — does what Phase 1 promised "
+        "actually surface in the final video plan?\n\n"
+        f"Rubric (each 1-10):\n{rubric_text}\n\n"
+        "OUTPUT FORMAT (single JSON object inside ```json fence):\n"
+        "{\n"
+        '  "overall": 7.5,\n'
+        '  "breakdown": {"core_message": 8, "visual_keywords": 7, ...},\n'
+        '  "comment": "2-3 sentence summary",\n'
+        '  "concrete_issues": [{"severity": "high|medium|low", "text": "with quoted evidence from artifacts"}]\n'
+        "}\n\n"
+        "Cite the actual artifact text when calling out drift. Be specific, "
+        "not generic."
+    )
+
+    user_msg = (
+        f"=== project_brief.md ===\n{brief_p.read_text(encoding='utf-8')[:3500]}\n\n"
+        f"=== setup_plan.json ===\n{setup_p.read_text(encoding='utf-8')[:2500]}\n\n"
+        f"=== cutting_plan.json ===\n{cutting_p.read_text(encoding='utf-8')[:3500]}\n\n"
+        f"=== voiceover_script_bilingual.json ===\n{voice_p.read_text(encoding='utf-8')[:2500]}\n"
+    )
+
+    client = anthropic_client()
+    model = model_for("reasoning")
+    log.info(f"start  cross-phase  model={model}")
+
+    from .error_agent import llm_call_with_recovery
+    try:
+        resp = llm_call_with_recovery(
+            lambda: client.messages.create(
+                model=model, max_tokens=2048, system=system,
+                thinking={"type": "disabled"},
+                messages=[{"role": "user", "content": user_msg}],
+            ),
+            run_dir=run_dir, agent="quality_judge",
+            step_label="score cross_phase",
+            context_hint={"phase": "cross_phase", "model": model},
+            log=log,
+        )
+    except Exception as e:
+        log.exception(f"cross-phase judge LLM call exhausted: {e}")
+        return None
+
+    text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+    try:
+        data = _extract_json(text)
+    except Exception as e:
+        log.exception(f"cross-phase output not parseable: {e}  raw={text[:500]}")
+        return None
+
+    record = {
+        "phase": "cross_phase_consistency",
+        "artifact_path": "(brief + setup_plan + cutting_plan + voiceover)",
+        "model": model,
+        "overall": float(data.get("overall", 0)),
+        "breakdown": data.get("breakdown") or {},
+        "comment": data.get("comment") or "",
+        "concrete_issues": data.get("concrete_issues") or [],
+        "source": "auto_judge",
+    }
+    save_local_score(run_dir, record)
+    log.info(f"cross-phase saved → scores.jsonl (overall={record['overall']}/10)")
     return record
 
 

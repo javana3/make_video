@@ -31,22 +31,83 @@ app = FastAPI(title="Promo Video Pipeline UI")
 
 
 def _fire_quality_judge(pipe: Pipeline, phase: str) -> None:
-    """Fire QualityJudge for a phase artifact in the background.
+    """Fire QualityJudge + deterministic metrics for a phase artifact.
 
-    Schedules an asyncio task that runs the (sync) judge in a thread, so the
-    LLM call doesn't block the route response. Failures are swallowed and
-    logged — judge is auxiliary; pipeline should not stop if it fails.
+    Two things happen async after each phase artifact lands:
+      1. LLM-as-a-Judge (subjective) — score_phase(phase, run_dir)
+      2. Deterministic scraper — collect_and_save(run_dir, phase_int)
+
+    Both write into scores.jsonl + their own files (metrics.jsonl for the
+    scraper). The scraper is cheap and synchronous; the LLM judge is the
+    slow part. Phase 4 has no LLM judge artifact (BGM is deterministic
+    generation), but still gets metrics collection.
+
+    Failures swallowed — scoring/metrics are auxiliary.
     """
+    _PHASE_NAME_TO_INT = {
+        "brief": 1, "setup_plan": 2, "cutting_plan": 3, "voiceover_script": 5,
+        # for cross_phase: trigger after the LAST phase artifact has been judged
+        "cross_phase": 5,
+    }
+    phase_int = _PHASE_NAME_TO_INT.get(phase)
+
     async def _go():
+        # 1) LLM judge (slow)
         try:
             from ..agents.quality_judge import score_phase
             await asyncio.to_thread(score_phase, phase, pipe.run_dir)
         except Exception as e:
             pipe.log.exception(f"quality_judge[{phase}] failed: {e}")
+        # 2) Deterministic metrics (cheap)
+        if phase_int is not None:
+            try:
+                from ..tools.run_metrics import collect_and_save
+                await asyncio.to_thread(collect_and_save, pipe.run_dir, phase_int)
+            except Exception as e:
+                pipe.log.exception(f"run_metrics[{phase_int}] failed: {e}")
+
     try:
         asyncio.create_task(_go())
     except RuntimeError:
         pipe.log.warning(f"quality_judge[{phase}] could not schedule (no loop)")
+
+
+def _fire_cross_phase_judge(pipe: Pipeline) -> None:
+    """Fire the cross-phase consistency judge after all 4 source artifacts exist.
+
+    Reads brief / setup_plan / cutting_plan / voiceover at once and rates
+    info-flow drift across the pipeline. The high-value eval that per-phase
+    rubrics by design can't see.
+    """
+    async def _go():
+        try:
+            from ..agents.quality_judge import score_cross_phase_consistency
+            await asyncio.to_thread(score_cross_phase_consistency, pipe.run_dir)
+        except Exception as e:
+            pipe.log.exception(f"cross_phase judge failed: {e}")
+    try:
+        asyncio.create_task(_go())
+    except RuntimeError:
+        pass
+
+
+def _fire_metrics_only(pipe: Pipeline, phase_int: int) -> None:
+    """Fire deterministic metrics collection without a paired LLM judge.
+
+    Used for phases where there's no LLM artifact to evaluate (Phase 4 BGM
+    is deterministic) but the metrics scraper still produces useful numbers
+    (ffprobe for v1_bgm_final.mp4, wallclock, retry count).
+    """
+    async def _go():
+        try:
+            from ..tools.run_metrics import collect_and_save
+            await asyncio.to_thread(collect_and_save, pipe.run_dir, phase_int)
+        except Exception as e:
+            pipe.log.exception(f"run_metrics[{phase_int}] failed: {e}")
+    try:
+        asyncio.create_task(_go())
+    except RuntimeError:
+        pass
 
 # Self-host Tailwind / htmx / htmx-sse from src/web/static/ — the project is
 # meant to run offline on a local box, so we cannot rely on cdn.tailwindcss.com
@@ -1152,20 +1213,41 @@ async def scores_panel(project: str, run_id: str, request: Request):
     """
     pipe = REGISTRY.get_or_load(project, run_id)
     from ..tools.score_log import read_local_scores
+    from ..tools.run_metrics import read_metrics
 
     all_scores = read_local_scores(pipe.run_dir)
 
-    # Most-recent auto_judge per phase (deduped by phase)
+    # Most-recent auto_judge per phase (deduped by phase). Includes the
+    # 4 core rubrics plus the new ones: demo_captions / voiceover_zh /
+    # voiceover_en / cross_phase_consistency.
     phases_seen: set[str] = set()
     auto_by_phase: list[dict] = []
+    cross_phase: Optional[dict] = None
     for rec in all_scores:
         if rec.get("source") != "auto_judge":
             continue
         ph = rec.get("phase")
+        if ph == "cross_phase_consistency":
+            if cross_phase is None:  # newest only
+                cross_phase = rec
+            continue
         if ph in phases_seen:
             continue
         phases_seen.add(ph)
         auto_by_phase.append(rec)
+
+    # Deterministic metrics — newest per phase
+    metric_phases_seen: set[str] = set()
+    metrics_by_phase: list[dict] = []
+    for rec in read_metrics(pipe.run_dir):
+        ph = rec.get("phase")
+        if ph in metric_phases_seen:
+            continue
+        metric_phases_seen.add(ph)
+        metrics_by_phase.append(rec)
+    # Order phase1..phase5
+    _phase_order = {f"phase{i}_metrics": i for i in range(1, 6)}
+    metrics_by_phase.sort(key=lambda r: _phase_order.get(r.get("phase", ""), 99))
 
     # Most-recent user rating (final video)
     user_rating = next((r for r in all_scores if r.get("source") == "user"), None)
@@ -1182,6 +1264,8 @@ async def scores_panel(project: str, run_id: str, request: Request):
     return TEMPLATES.TemplateResponse(request, "scores.html", {
         "project": project, "run_id": run_id,
         "auto_scores": auto_by_phase,
+        "cross_phase": cross_phase,
+        "metrics_by_phase": metrics_by_phase,
         "user_rating": user_rating,
         "final_video": final_path,
         "raw_scores": all_scores[:20],
@@ -2174,6 +2258,7 @@ async def _run_phase4_async(pipe: Pipeline) -> None:
         await asyncio.to_thread(mux_bgm, v1, bgm_final, v1_bgm, 0.7)
 
         pipe.record_asset("v1_bgm_final", v1_bgm, verified=True)
+        _fire_metrics_only(pipe, 4)
         pipe.transition(phase=4, gate="waiting_bgm_review")
     except Exception as e:
         pipe.log.exception(f"phase4 failed: {e}")
@@ -2236,7 +2321,13 @@ async def _run_phase5_async(pipe: Pipeline, lang: str = "zh-CN") -> None:
         bilingual = voice_dir / "voiceover_script_bilingual.json"
         if not bilingual.exists():
             await asyncio.to_thread(propose_script, run_dir, brief, plan, bilingual)
+            # Fire all 4 voiceover-related judges + cross-phase consistency.
+            # propose_script writes bilingual.json AND per-language splits,
+            # so all 3 voice artifacts exist at this point.
             _fire_quality_judge(pipe, "voiceover_script")
+            _fire_quality_judge(pipe, "voiceover_zh")
+            _fire_quality_judge(pipe, "voiceover_en")
+            _fire_cross_phase_judge(pipe)
 
         per = voice_dir / f"voiceover_script_{lang}.json"
         seg_dir = voice_dir / f"per_segment_{lang}"
@@ -2601,6 +2692,9 @@ async def accept_demo_route(project: str, run_id: str):
     cap_src = pipe.run_dir / "demo_captions.jsonl"
     if cap_src.exists():
         pipe.record_asset("demo_captions", cap_src, verified=True, source="demo_driver")
+        # Score the demo captions before they get folded into Phase 3 — gives
+        # the user a quality signal on the demo BEFORE committing to Remotion.
+        _fire_quality_judge(pipe, "demo_captions")
     pipe.bus.emit("asset_verified", agent="pipeline",
                    name="recording_test", path=str(target))
     pipe.transition(phase=3, gate="running")
