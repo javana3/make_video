@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# >>> teamagent post-merge block >>>
+# TeamAgent M5 post-merge：拉取后自动同步团队规则进本地 KB
+# 设计：警告而不阻塞——sync 失败不能让 git pull 失败
+
+if [ "${TEAMAGENT_BOOTSTRAP_SKIP:-}" = "1" ]; then
+  exit 0
+fi
+
+if ! command -v teamagent >/dev/null 2>&1; then
+  exit 0
+fi
+
+if teamagent --help 2>&1 | grep -q "m5-sync"; then
+  REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  teamagent m5-sync --project-root "$REPO_ROOT" --apply 2>&1 || true
+fi
+exit 0
+# <<< teamagent post-merge block <<<

@@ -1,0 +1,12 @@
+{
+  "created_at": "2026-05-14T01:43:32.186Z",
+  "created_by": "javana3",
+  "required_hooks": [
+    "UserPromptSubmit",
+    "Stop"
+  ],
+  "required_plugins": [],
+  "required_project_skills": [],
+  "schema_version": 1,
+  "teamagent_version": "0.0.0"
+}
