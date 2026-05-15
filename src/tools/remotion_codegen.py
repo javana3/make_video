@@ -159,7 +159,13 @@ def _bg_jsx(bg: dict, scene_duration_s: float, src_fps: int) -> str:
 def _text_el_jsx(el: dict, scene_frames: int, fps: int) -> str:
     """Render one text element as an absolutely-positioned div with explicit
     centering via translate. Avoids flex layout quirks of AbsoluteFill."""
-    content = el.get("content", "").replace('"', '\\"').replace("\n", "\\n")
+    # JSX attribute values with double-quote delimiters DO NOT parse backslash
+    # escapes — `attr="\"x\""` is a syntax error, not a string with quotes.
+    # To embed a string that may contain quotes/newlines, use a JSX expression
+    # `content={"..."}` with a properly-encoded JS string literal. json.dumps
+    # produces exactly that (handles ", \, \n, unicode etc).
+    import json as _json
+    content_js = _json.dumps(el.get("content", ""), ensure_ascii=False)
     fs = int(el.get("font_size_px", 48))
     color = el.get("color", "#FFFFFF")
     x = el.get("x", "center")
@@ -190,7 +196,7 @@ def _text_el_jsx(el: dict, scene_frames: int, fps: int) -> str:
     # level, plays nicely with TransitionSeries. Fade-in/out via interpolate.
     return (
         '<TextEl '
-        f'content="{content}" '
+        f'content={{{content_js}}} '
         f'fontSize={{{fs}}} '
         f'color="{color}" '
         f'top={top_css} '

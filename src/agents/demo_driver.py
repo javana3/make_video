@@ -88,6 +88,56 @@ HOW TO OPERATE — CLI MODE (pty_* tools)
   pty_send(text)                        — write to stdin (include \\n if needed)
   pty_wait_for(pattern, timeout_s)      — regex on the screen
   pty_is_alive()
+  pty_transcript(tail_lines=200)        — FULL stdout/stderr history, including
+                                          tracebacks/errors that scrolled off
+                                          the 100x30 screen. Primary debug tool.
+  pty_restart(extra_env, extra_args,    — kill+respawn the CLI with new env/args.
+              replace_args)               Use AFTER diagnosing a crash, not
+                                          blindly. Recording continues.
+
+═══════════════════════════════════════════════════════════════════════
+DEBUGGING WHEN SOMETHING GOES WRONG — DO NOT FINISH ON A BROKEN STATE
+═══════════════════════════════════════════════════════════════════════
+The project may crash, throw a traceback, hang, output garbled text,
+exit unexpectedly, return errors, refuse input, etc. When ANY of those
+happens, your job is NOT to just record it and call finish_demo. Your
+job is to investigate and fix where you can. The pipeline downstream
+turns your recording into a promo video — a video that ends with a
+Python traceback is worthless to the user.
+
+Iron law for failure recovery:
+
+1. **Diagnose first.** Call `pty_transcript(tail_lines=400)` and read the
+   actual error output. The 100x30 visible screen is too small to hold
+   a real Python traceback or a long error.
+2. **Find the cause in source.** If transcript shows `File ".../foo.py", line N`
+   or names a specific module/function, `read_file(...)` it. Find the
+   actual code that produced the failure.
+3. **Check what's modifiable from outside.** Many failures are fixable
+   without editing source:
+     - Windows GBK encoding crash on Chinese print → `pty_restart(extra_env={"PYTHONIOENCODING":"utf-8"})`
+     - Color-emitting library garbled in pyte → `extra_env={"NO_COLOR":"1"}` or `--no-color` arg
+     - Different entry point exists (smoke.py, demo.py) → `pty_restart(replace_args=[...])`
+     - Missing config file the project would have created → write a minimal config
+       (NOT in this run — note in finish_demo summary so user can fix the project).
+4. **Try the fix.** Call `pty_restart` with the targeted change. Watch the
+   transcript again. If recovered, continue the demo.
+5. **Limit attempts.** Try at most 2-3 distinct fixes. If none work, call
+   `finish_demo(completeness='blocked', summary=...)` with a concrete root
+   cause and the fixes you tried. Do NOT finish 'partial' silently after
+   a crash — call it 'blocked' so the user knows there's an unresolved
+   issue in the project itself.
+
+Backends, services, GUIs:
+- For web/backend projects, after a browser action that fails: call
+  `tail_service_log(name, kind='stderr', lines=200)` for the matching
+  service to see the server-side traceback. Read the relevant route
+  handler source. Same iron law applies — diagnose, try a fix, retry.
+- For desktop GUI projects (no headless mode, no browser, no CLI):
+  this pipeline doesn't yet support full GUI driving. Record what's
+  available (a terminal launch / help output) and call finish_demo
+  with completeness='partial' and an explicit note about the missing
+  capability.
 
 ═══════════════════════════════════════════════════════════════════════
 PACING — DON'T RUSH, DON'T STOP EARLY
@@ -142,6 +192,14 @@ Antipatterns to avoid:
   ✗ Ignoring live user feedback
   ✗ Burning turns on read_file when you should be operating the program
   ✗ Burning turns operating the program before you've understood the code
+  ✗ Calling finish_demo immediately after seeing a crash / traceback /
+    unexpected exit. ALWAYS pty_transcript + read_file the implicated
+    source FIRST. Try a pty_restart with a targeted fix. Only then,
+    if truly stuck, finish_demo(completeness='blocked').
+  ✗ Recording a mark_caption that says "(crashed on ...)" or "(error
+    because ...)" and then immediately finish_demo. That is exactly
+    the failure mode. The caption captures the moment; your NEXT move
+    must be diagnosis + recovery, not retreat.
 """
 
 
@@ -251,6 +309,48 @@ _PTY_TOOLS = [
                        "properties": {"pattern": {"type": "string"},
                                        "timeout_s": {"type": "number", "default": 30.0}},
                        "required": ["pattern"]}},
+    {"name": "pty_transcript",
+     "description": (
+         "Return the FULL stdout/stderr history of the CLI process(es) "
+         "since session start, including bytes the 100x30 pyte screen has "
+         "already scrolled past. THIS IS THE PRIMARY DEBUG TOOL when the "
+         "program crashed, hit a traceback, hung, or behaved unexpectedly — "
+         "the visible screen is too small to hold a Python traceback or a "
+         "long error message. Restart markers separate sessions if "
+         "pty_restart was called."
+     ),
+     "input_schema": {"type": "object",
+                       "properties": {
+                           "tail_lines": {"type": "integer",
+                                           "description": "Last N lines of transcript. Defaults to 200 if neither is given."},
+                           "head_lines": {"type": "integer",
+                                           "description": "First N lines instead (for very early start-up errors)."},
+                       }}},
+    {"name": "pty_restart",
+     "description": (
+         "Kill the current CLI process and respawn it. The video recording "
+         "continues — the crash + restart + recovered demo become one "
+         "continuous video. Use AFTER you have diagnosed a failure (via "
+         "pty_transcript + read_file) AND have a concrete hypothesis for a "
+         "fix. Examples:\n"
+         "  - Windows GBK encoding crash → extra_env={\"PYTHONIOENCODING\":\"utf-8\"}\n"
+         "  - Wrong CLI flag → replace_args=[\"python\",\"-u\",\"main.py\",\"--no-color\"]\n"
+         "  - Different subcommand entirely → replace_args=[...]\n"
+         "DO NOT restart blindly more than 2-3 times — if you can't fix it "
+         "via env/args alone, call finish_demo with completeness='blocked' "
+         "and a clear summary of the unfixable issue."
+     ),
+     "input_schema": {"type": "object",
+                       "properties": {
+                           "extra_env": {"type": "object",
+                                          "description": "Env vars to merge into existing env (e.g. {\"PYTHONIOENCODING\":\"utf-8\"})."},
+                           "extra_args": {"type": "array",
+                                           "items": {"type": "string"},
+                                           "description": "Args to append to the current command argv."},
+                           "replace_args": {"type": "array",
+                                             "items": {"type": "string"},
+                                             "description": "Entirely replace the command argv (instead of appending)."},
+                       }}},
     {"name": "pty_is_alive", "description": "Whether the underlying process is still running.",
      "input_schema": {"type": "object", "properties": {}}},
 ]
@@ -708,6 +808,21 @@ def run_demo_driver(*,
             return {"matched": ok, "screen_tail": session.read_recent(15)}
         if name == "pty_is_alive":    return {"alive": session.is_alive(),
                                                 "exit_code": session.exit_code()}
+        if name == "pty_transcript":
+            tail = args.get("tail_lines")
+            head = args.get("head_lines")
+            if tail is None and head is None:
+                tail = 200
+            return session.transcript(
+                tail_lines=int(tail) if tail is not None else None,
+                head_lines=int(head) if head is not None else None,
+            )
+        if name == "pty_restart":
+            return session.restart(
+                extra_env=args.get("extra_env") or None,
+                extra_args=args.get("extra_args") or None,
+                replace_args=args.get("replace_args") or None,
+            )
         return f"ERROR: unknown tool {name!r}"
 
     # ─── main loop
@@ -742,8 +857,12 @@ def run_demo_driver(*,
 
             from .error_agent import llm_call_with_recovery
             resp = llm_call_with_recovery(
+                # thinking={"type":"disabled"} — glm-5.1 otherwise spends the
+                # full max_tokens budget on hidden reasoning and emits no
+                # tool_use blocks. Same fix as quality_judge.py & setup_runner.
                 lambda: client.messages.create(
                     model=model, max_tokens=4096,
+                    thinking={"type": "disabled"},
                     system=effective_system_prompt, tools=tools, messages=messages,
                 ),
                 run_dir=run_dir,
@@ -777,6 +896,18 @@ def run_demo_driver(*,
                     out = f"ERROR: {type(e).__name__}: {e}"
                     log.exception(f"tool {tu.name} failed")
                 tool_results.append(_format_tool_result(tu.id, out))
+                # After EVERY tool call, save current page screenshot to a
+                # known path so the UI can show a 2s-delay live preview.
+                # Atomic write via .tmp + replace so reads never see a torn
+                # PNG. Skipped for cli mode (no browser session).
+                if mode == "web":
+                    try:
+                        png = session.screenshot(full_page=False)
+                        tmp = run_dir / "demo_preview.tmp.png"
+                        tmp.write_bytes(png)
+                        tmp.replace(run_dir / "demo_preview.png")
+                    except Exception:
+                        pass
 
             messages.append({"role": "user", "content": tool_results})
 

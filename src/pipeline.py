@@ -92,6 +92,14 @@ class Pipeline:
                 finished.write_text(str(_now()), encoding="utf-8")
         except Exception:
             pass
+        # Auto-clear last_error on forward progress. Without this the
+        # /retry button retargets a long-resolved early-stage error after
+        # later phases succeed (stale banner traps the user). gate=failed
+        # transitions come from record_error() which sets last_error
+        # AFTER this method's save() — so they survive this clear.
+        if (phase is not None and prev_phase is not None and phase > prev_phase
+                and gate != "failed" and self.state.last_error is not None):
+            self.state.last_error = None
         self.save()
         self.log.info(
             f"transition: phase {prev_phase}→{self.state.phase}, "

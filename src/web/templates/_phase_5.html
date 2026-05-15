@@ -1,75 +1,73 @@
-<!-- Phase 5 · VoiceOver: script + edge-tts + timeline + ducking → outputs/final_<lang>.mp4 -->
-{% set final_zh_exists = phase5_state.final_zh_exists %}
-{% set final_en_exists = phase5_state.final_en_exists %}
-{% set is_running = phase5_state.is_running %}
+<!-- Phase 5 · VoiceOver: script + edge-tts + timeline + ducking → outputs/final_<lang>.mp4
+     Layout:
+       1. Status panel (POLLED only while Phase 5 isn't done)
+       2. Video player + rating widget (parent-level, rendered ONCE) —
+          isolated from polling so <video> never reloads and form input
+          never gets wiped. -->
 
-<div class="rounded-lg border border-emerald-700/40 bg-emerald-950/15 px-5 py-5 space-y-3">
-  <div class="flex items-center gap-2">
-    <span class="text-base font-semibold text-emerald-200">🗣️ Phase 5 · VoiceOver</span>
-    <span class="text-xs text-slate-500">LLM script + edge-tts + ducking → final.mp4</span>
-  </div>
+{% set finals_done = phase5_state.final_zh_exists or phase5_state.final_en_exists %}
 
-  {% if not final_zh_exists and not final_en_exists %}
-  <p class="text-sm text-slate-400">
-    Step1 LLM 写中英 voiceover_script.json → Step2 edge-tts 逐句合成 → Step3 voice_full.wav 拼合 → Step4 BGM ducking + amix。
-    <span class="text-slate-500">~30-60s</span>
-  </p>
-  <div class="flex gap-2 flex-wrap">
-    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result" hx-swap="innerHTML">
-      <input type="hidden" name="lang" value="zh-CN"/>
-      <button type="submit" {% if is_running %}disabled{% endif %}
-              class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm rounded font-semibold disabled:opacity-50">
-        🗣️ 跑 Phase 5（中文）
-      </button>
-    </form>
-    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result" hx-swap="innerHTML">
-      <input type="hidden" name="lang" value="en-US"/>
-      <button type="submit" {% if is_running %}disabled{% endif %}
-              class="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white text-sm rounded font-semibold disabled:opacity-50">
-        🗣️ Phase 5 (English)
-      </button>
-    </form>
-    {% if is_running %}<span class="text-xs text-emerald-300 self-center">⏳ 正在跑...</span>{% endif %}
+{# Status panel — keeps polling while running. Stops the moment finals
+   exist (initial page load case): we don't render the hx-trigger at all. #}
+<div hx-get="/runs/{{ project }}/{{ run_id }}/phase5_panel"
+     {% if finals_done %}
+       hx-trigger="load"
+     {% else %}
+       hx-trigger="load, every 3s, phase5-refresh from:body"
+     {% endif %}
+     hx-swap="innerHTML"
+     hx-on::before-swap="window.__savedScrollY = window.scrollY"
+     hx-on::after-swap="if (typeof window.__savedScrollY === 'number') window.scrollTo(0, window.__savedScrollY)">
+  <div class="rounded-lg border border-emerald-700/40 bg-emerald-950/15 px-5 py-12 text-center text-emerald-300 text-sm">
+    Loading Phase 5 status...
   </div>
-  {% else %}
-  <div class="text-sm text-slate-300">✅ Final video 完成</div>
-  {% if final_zh_exists %}
-  <div>
-    <div class="text-xs text-slate-500 mb-1">final_zh-CN.mp4 · {{ phase5_state.zh_size_mb }} MB</div>
+</div>
+
+{# Video players + add-language buttons + rating — rendered ONCE at parent
+   level the moment finals exist. NEVER replaced by panel polls. #}
+{% if finals_done %}
+<div class="mt-3 space-y-3">
+  {% if phase5_state.final_zh_exists %}
+  <div class="rounded-lg border border-emerald-700/40 bg-emerald-950/10 p-3 space-y-1">
+    <div class="text-xs text-slate-400">🎬 final_zh-CN.mp4 · {{ phase5_state.zh_size_mb }} MB</div>
     <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/final_zh-CN.mp4"
-           controls class="w-full max-h-[50vh] rounded border border-slate-700 bg-black"></video>
+           controls preload="metadata"
+           class="w-full max-h-[60vh] rounded border border-slate-700 bg-black"></video>
   </div>
   {% endif %}
-  {% if final_en_exists %}
-  <div>
-    <div class="text-xs text-slate-500 mb-1">final_en-US.mp4 · {{ phase5_state.en_size_mb }} MB</div>
+  {% if phase5_state.final_en_exists %}
+  <div class="rounded-lg border border-sky-700/40 bg-sky-950/10 p-3 space-y-1">
+    <div class="text-xs text-slate-400">🎬 final_en-US.mp4 · {{ phase5_state.en_size_mb }} MB</div>
     <video src="/runs/{{ project }}/{{ run_id }}/artifacts/outputs/final_en-US.mp4"
-           controls class="w-full max-h-[50vh] rounded border border-slate-700 bg-black"></video>
+           controls preload="metadata"
+           class="w-full max-h-[60vh] rounded border border-slate-700 bg-black"></video>
   </div>
   {% endif %}
+
   <div class="flex gap-2 flex-wrap">
-    {% if not final_zh_exists %}
+    {% if not phase5_state.final_zh_exists %}
     <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result">
       <input type="hidden" name="lang" value="zh-CN"/>
-      <button type="submit" class="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 text-white text-sm rounded">+ 中文版</button>
+      <button type="submit" class="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 text-white text-sm rounded">
+        + 中文版
+      </button>
     </form>
     {% endif %}
-    {% if not final_en_exists %}
+    {% if not phase5_state.final_en_exists %}
     <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result">
       <input type="hidden" name="lang" value="en-US"/>
-      <button type="submit" class="px-3 py-2 bg-sky-700 hover:bg-sky-600 text-white text-sm rounded">+ English</button>
+      <button type="submit" class="px-3 py-2 bg-sky-700 hover:bg-sky-600 text-white text-sm rounded">
+        + English
+      </button>
     </form>
     {% endif %}
   </div>
 
-  <!-- User rating widget — only shown when at least one final exists -->
-  <div class="border-t border-emerald-800/40 pt-3 mt-2">
-    <div class="text-sm text-amber-200 mb-2">
-      ⭐ 给最终视频打分（仅你能打）
-    </div>
+  <!-- Rating widget — rendered ONCE here, never touched by polling -->
+  <div class="rounded-lg border border-amber-700/40 bg-amber-950/15 px-5 py-4">
+    <div class="text-sm text-amber-200 mb-2">⭐ 给最终视频打分（仅你能打）</div>
     <form hx-post="/runs/{{ project }}/{{ run_id }}/score_final"
-          hx-target="#phase5-rating-result"
-          hx-swap="innerHTML"
+          hx-target="#phase5-rating-result" hx-swap="innerHTML"
           class="flex items-center gap-3 flex-wrap">
       <div class="flex items-center gap-1">
         {% for n in [1, 2, 3, 4, 5] %}
@@ -84,9 +82,9 @@
         {% endfor %}
       </div>
       <input type="text" name="comment" placeholder="评语（可选）"
-             class="flex-1 min-w-[200px] bg-slate-950 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 focus:border-amber-500"/>
+             class="flex-1 min-w-[200px] bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm text-slate-200 focus:border-amber-500 focus:outline-none"/>
       <button type="submit"
-              class="px-3 py-1 bg-amber-500/30 hover:bg-amber-500/50 border border-amber-400/60 text-amber-100 rounded text-xs font-semibold">
+              class="px-4 py-1.5 bg-amber-500/30 hover:bg-amber-500/50 border border-amber-400/60 text-amber-100 rounded text-sm font-semibold">
         提交评分
       </button>
       <a href="/runs/{{ project }}/{{ run_id }}/scores"
@@ -94,5 +92,5 @@
       <div id="phase5-rating-result" class="basis-full"></div>
     </form>
   </div>
-  {% endif %}
 </div>
+{% endif %}

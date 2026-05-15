@@ -1,0 +1,105 @@
+{# Inner panel polled every 3s by _phase_5.html — Phase 5 VoiceOver live status. #}
+
+<div class="rounded-lg border border-emerald-700/40 bg-emerald-950/15 px-5 py-5 space-y-3">
+  <div class="flex items-baseline gap-2 flex-wrap">
+    <span class="text-base font-semibold text-emerald-200">🗣️ Phase 5 · VoiceOver</span>
+    <span class="text-xs text-slate-500">LLM script + edge-tts + ducking → final.mp4</span>
+    <span class="ml-auto"></span>
+    {% if is_running %}
+    <span class="inline-flex items-center gap-1.5 px-2 py-0.5 bg-amber-500/20 border border-amber-500/40 text-amber-300 text-xs rounded">
+      <span class="w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse"></span>
+      Agent running
+      {% if running_lang %}· {{ running_lang }}{% endif %}
+      {% if elapsed_s is not none %}· {{ elapsed_s }}s{% endif %}
+    </span>
+    {% elif final_zh_exists or final_en_exists %}
+    <span class="px-2 py-0.5 bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs rounded">✓ done</span>
+    {% elif last_error %}
+    <span class="px-2 py-0.5 bg-rose-500/20 border border-rose-500/40 text-rose-300 text-xs rounded">⚠ 失败 — 看顶部 banner</span>
+    {% else %}
+    <span class="px-2 py-0.5 bg-slate-700/50 border border-slate-600 text-slate-400 text-xs rounded">idle</span>
+    {% endif %}
+  </div>
+
+  {# 4-step chips: bilingual script → TTS per cue → voice_full → ducking + amix #}
+  {% set steps = [
+    ("script", "1. LLM 写中英 script", bilingual_exists),
+    ("tts",    "2. edge-tts 逐句合成", zh_segments > 0 or en_segments > 0),
+    ("full",   "3. voice_full.wav 拼合", zh_full_exists or en_full_exists),
+    ("mix",    "4. BGM ducking + amix", final_zh_exists or final_en_exists),
+  ] %}
+  <div class="flex items-center gap-1.5 flex-wrap">
+    {% for key, label, done in steps %}
+    <span class="px-2 py-0.5 rounded text-[10px] font-mono border
+      {% if done %}bg-emerald-500/15 border-emerald-500/30 text-emerald-300
+      {% elif is_running %}bg-amber-500/15 border-amber-500/30 text-amber-300
+      {% else %}bg-slate-800 border-slate-700 text-slate-500{% endif %}">
+      {% if done %}✓{% elif is_running %}▶{% else %}·{% endif %} {{ label }}
+    </span>
+    {% endfor %}
+  </div>
+
+  {# Per-language segment count #}
+  {% if zh_segments or en_segments %}
+  <div class="grid grid-cols-2 gap-2 text-xs">
+    {% if zh_segments %}
+    <div class="bg-slate-950/40 border border-slate-800 rounded px-2 py-1">
+      <span class="text-slate-500">zh-CN 合成段</span>
+      <span class="ml-2 text-slate-200 font-mono">{{ zh_segments }}</span>
+    </div>
+    {% endif %}
+    {% if en_segments %}
+    <div class="bg-slate-950/40 border border-slate-800 rounded px-2 py-1">
+      <span class="text-slate-500">en-US 合成段</span>
+      <span class="ml-2 text-slate-200 font-mono">{{ en_segments }}</span>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# Prereq check — v1_bgm_final.mp4 OR v1.mp4 must exist #}
+  {% if not is_running and not (final_zh_exists or final_en_exists) and not v1_bgm_exists %}
+  <div class="rounded-lg border border-rose-700/50 bg-rose-950/30 px-4 py-3 space-y-2">
+    <div class="text-sm font-semibold text-rose-200">❌ 缺少 Phase 5 前置产物</div>
+    <div class="text-xs text-rose-300">
+      Phase 5 需要 <code class="bg-black/40 px-1 rounded">outputs/v1_bgm_final.mp4</code>
+      (或 v1.mp4 — 但没 BGM 的话最后混音会怪)。先完成 Phase 4。
+    </div>
+    <a href="/runs/{{ project }}/{{ run_id }}/view_phase/4"
+       class="inline-block px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-200 rounded text-xs">
+      📖 查看 Phase 4（只读）
+    </a>
+  </div>
+  {% endif %}
+
+  {# Idle state: language buttons #}
+  {% if not is_running and not (final_zh_exists or final_en_exists) and v1_bgm_exists %}
+  <p class="text-sm text-slate-400">
+    Step1 LLM 写中英 voiceover_script.json → Step2 edge-tts 逐句合成 → Step3 voice_full.wav 拼合 → Step4 BGM ducking + amix。
+    <span class="text-slate-500">~30-60s</span>
+  </p>
+  <div class="flex gap-2 flex-wrap">
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result" hx-swap="innerHTML">
+      <input type="hidden" name="lang" value="zh-CN"/>
+      <button type="submit"
+              class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-sm rounded font-semibold">
+        🗣️ 跑 Phase 5（中文）
+      </button>
+    </form>
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/run_phase5" hx-target="#action-result" hx-swap="innerHTML">
+      <input type="hidden" name="lang" value="en-US"/>
+      <button type="submit"
+              class="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white text-sm rounded font-semibold">
+        🗣️ Phase 5 (English)
+      </button>
+    </form>
+  </div>
+  {% endif %}
+
+  {# NOTE: when finals exist, video players + rating widget + "+ 中文 / + English"
+     buttons all live at _phase_5.html parent level (rendered ONCE) so the
+     3-second swap can never reset the <video> source or destroy form input. #}
+  {% if final_zh_exists or final_en_exists %}
+  <div class="text-sm text-slate-300">✅ Final video 完成 · 视频和评分在下方</div>
+  {% endif %}
+</div>

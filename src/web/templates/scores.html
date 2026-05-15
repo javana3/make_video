@@ -331,8 +331,13 @@
           <span class="text-slate-300 ml-2">{{ s.phase }}</span>
           {% if s.source == 'user' %}
           <span class="ml-2 text-amber-300">user {{ s.rating_1_to_5 }}/5</span>
+          {% elif s.source == 'auto_judge' %}
+          <span class="ml-2 text-cyan-300">auto_judge {{ '%.1f' % (s.overall or 0) }}/10</span>
+          {% elif s.source == 'deterministic_metric' %}
+          <span class="ml-2 text-slate-400">deterministic ⏱{{ s.wallclock_s or '?' }}s
+            {% if s.retries %} ↻{{ s.retries }}{% endif %}</span>
           {% else %}
-          <span class="ml-2 text-cyan-300">{{ s.source }} {{ '%.1f' % s.overall }}/10</span>
+          <span class="ml-2 text-slate-500">{{ s.source or '?' }}</span>
           {% endif %}
         </div>
         {% endfor %}

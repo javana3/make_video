@@ -115,14 +115,29 @@ as a base palette). Default to a low-saturation tech DS — `vercel`,
 explicitly call for editorial/warm/playful.
 
 `initial_prompt` for hyperframes MUST encode a video brief:
-   - duration (15s / 30s / 45s — pick based on the brief's pacing)
+   - duration: prefer 15-25s — Douyin/TikTok-vertical pacing rewards
+     fast cuts and a sub-30s total; use 30s only if the product
+     genuinely needs the extra time. 45s is too long for this format.
    - scene arc (3-6 named scenes with one-line beat each, drawn from
      the product's 独特卖点 or core features — never invent new copy)
    - palette (2-3 hex colors max, anchored to visual_keywords)
-   - typography (one display font + one mono/body)
+   - typography (one display font + one mono/body) — sized for mobile
+     viewing: headlines ≥ 80px, body ≥ 40px at 1080x1920 canvas
    - motion style (restrained / explosive / cinematic — pick one)
-   - hard constraints: 1920x1080, no external image assets, no audio
-     unless brief specifically asks for narration
+   - **hard constraints (NON-NEGOTIABLE — VERTICAL FORMAT)**:
+     * **canvas 1080×1920** (portrait, 9:16) — this is the Douyin /
+       TikTok / 抖音 / 小红书 / YouTube Shorts native format. NOT
+       1920×1080. Every scene composition must work in 9:16.
+     * Compose for the **center 70% column** — viewers' thumbs cover
+       the bottom 15% (action bar) and the top 10% (status/comments).
+       Put the killer headline at ~25-35% from top; the call-to-action
+       at ~75-85% from top.
+     * **No tiny side-by-side layouts** — there is no horizontal space
+       for two columns. Stack vertically.
+     * No external image assets, no audio unless brief specifically
+       asks for narration.
+     * The first 2 seconds must hook a swipe-happy viewer — bold
+       statement frame, no slow fade-in from black for 2 full seconds.
 
 ═══ FALLBACK MODE · STATIC HERO (rare — only if brief explicitly says so) ═══
 Target skill: `web-prototype` / `magazine-poster` / `social-carousel`.
@@ -153,7 +168,8 @@ def _extract_json(text: str) -> dict:
     return json.loads(text)
 
 
-def llm_pick_setup(daemon_url: str, brief: str) -> dict:
+def llm_pick_setup(daemon_url: str, brief: str,
+                    run_dir: Optional[Path] = None) -> dict:
     """One LLM call → {skill_id, design_system_id, initial_prompt}."""
     log = agent_logger("agent6_opendesigner")
     skills = list_skills(daemon_url)
@@ -176,14 +192,36 @@ def llm_pick_setup(daemon_url: str, brief: str) -> dict:
     client = anthropic_client()
     model = model_for("reasoning")
     log.info(f"LLM pick_setup model={model} skills={len(skills)} ds={len(dss)}")
+    # thinking={"type":"disabled"} — glm-5.1 otherwise burns max_tokens on
+    # hidden reasoning and emits empty text, breaking _extract_json. Same
+    # fix as quality_judge.py / setup_runner.py.
+    # max_tokens=2400 — the JSON includes `initial_prompt` (a multi-paragraph
+    # video brief that easily runs 1000+ tokens). At 900 it gets truncated mid
+    # string and json.loads fails with "Expecting ',' delimiter".
     resp = client.messages.create(
         model=model,
-        max_tokens=900,
+        max_tokens=2400,
+        thinking={"type": "disabled"},
         system=_BOOTSTRAP_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
     )
     text = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
-    data = _extract_json(text)
+    log.info(f"LLM pick_setup response ({len(text)}B, stop={resp.stop_reason}, "
+             f"in={resp.usage.input_tokens}, out={resp.usage.output_tokens})")
+    try:
+        data = _extract_json(text)
+    except Exception as e:
+        # Save the raw output for forensic debugging if a run_dir is known.
+        if run_dir is not None:
+            raw_path = run_dir / "opendesign" / "bootstrap_llm_raw.txt"
+            raw_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_path.write_text(text, encoding="utf-8")
+        raise RuntimeError(
+            f"LLM pick_setup returned non-JSON: {type(e).__name__}: {e}. "
+            f"stop_reason={resp.stop_reason}, "
+            f"out_tokens={resp.usage.output_tokens}. "
+            f"Try increasing max_tokens or relaxing the schema."
+        ) from e
     # Validate ids actually exist; fall back to safe defaults if LLM hallucinated
     valid_skill_ids = {s["id"] for s in skills}
     valid_ds_ids = {d["id"] for d in dss}
@@ -220,7 +258,7 @@ def bootstrap(run_dir: Path,
     log = agent_logger("agent6_opendesigner")
     agent_id = pick_available_agent(endpoint.daemon_url,
                                      preferred_agents or ["opencode", "claude", "cursor-agent"])
-    setup = llm_pick_setup(endpoint.daemon_url, brief)
+    setup = llm_pick_setup(endpoint.daemon_url, brief, run_dir=run_dir)
     log.info(f"setup picked: skill={setup['skill_id']} ds={setup['design_system_id']}")
 
     proj = create_project(
@@ -291,8 +329,9 @@ Your output is the next prompt sent to OpenCode. It MUST:
   index.html`. OpenCode should edit ONLY that file (not files in project
   root) and re-dispatch render via OD daemon (`media generate --surface
   video --model hyperframes-html --composition-dir <slot>`).
-- Forbid adding new external assets. The render must stay under
-  1920x1080 / 30fps unless user asked otherwise.
+- Forbid adding new external assets. The render must stay at
+  1080×1920 (vertical 9:16, Douyin/TikTok format) / 30fps unless
+  user asked otherwise.
 - Keep it under ~8 lines. Plain prose."""
 
 
@@ -319,9 +358,13 @@ def translate_feedback(sess: OpenDesignSession, user_feedback: str) -> str:
     client = anthropic_client()
     model = model_for("reasoning")
     log.info(f"translate_feedback mode={sess.mode} model={model} feedback_len={len(user_feedback)} history={len(sess.history)}")
+    # max_tokens=3000 — translated prompts can be long when user feedback is
+    # detailed (or when feedback comes from the critic with revision_prompt
+    # already 2k+ chars). 600 used to truncate.
     resp = client.messages.create(
         model=model,
-        max_tokens=600,
+        max_tokens=3000,
+        thinking={"type": "disabled"},
         system=system_prompt,
         messages=[{"role": "user", "content": user_msg}],
     )

@@ -1,0 +1,111 @@
+<!-- Phase 2 sub-state: recording in hand. OpenDesign + Critic Agent pipeline
+     fires automatically. User decides via Critic panel below (✅满意 /
+     🔄 让 critic 再改 / 📝 我说一句), OR can ⏭ skip the whole step. -->
+
+<div class="space-y-4">
+
+  <!-- Status banner -->
+  <div class="rounded-lg border-2 border-violet-500/40 bg-violet-950/20 px-5 py-4">
+    <div class="flex items-baseline gap-2 flex-wrap mb-2">
+      <span class="text-base">🎨</span>
+      <span class="text-base font-semibold text-violet-200">OpenDesign Hero · 自动 + Critic Agent</span>
+      <span class="ml-auto text-xs text-violet-400/70">默认开启 · 想跳过点最底下</span>
+    </div>
+    <p class="text-sm text-slate-300">
+      录屏已采纳。流水线在后台跑：<strong>OpenDesigner 出第一版 → Critic Agent 用 vision LLM 看图打分 →
+      不满意写改稿指令送回 OpenDesigner → loop 至满意或上限 5 轮</strong>。
+      你随时可以在下方 Critic 面板里点 <strong>✅ 满意</strong> 跳过剩余迭代直接进 Phase 3。
+    </p>
+  </div>
+
+  <!-- Critic panel (polls itself every 3s while running) -->
+  <div id="od-critic-root"
+       hx-get="/runs/{{ project }}/{{ run_id }}/opendesign/critic_panel"
+       hx-trigger="load, opendesign-critic-refresh from:body"
+       hx-swap="innerHTML">
+    <div class="rounded-lg border border-purple-700/40 bg-purple-950/15 px-5 py-8 text-center text-purple-300 text-sm">
+      Loading Critic Agent status...
+    </div>
+  </div>
+
+  <!-- Bootstrap / session state -->
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-5 py-4 space-y-3">
+    <div class="flex items-baseline gap-2">
+      <span class="text-sm font-semibold text-slate-200">Session 状态</span>
+      <span class="ml-auto"></span>
+      {% if session %}
+        <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300">
+          ✓ bootstrap 完成
+        </span>
+      {% else %}
+        <span class="text-xs px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300">
+          ⏳ bootstrap 进行中...
+        </span>
+      {% endif %}
+    </div>
+    {% if session %}
+      <div class="grid grid-cols-2 gap-2 text-xs">
+        <div class="bg-slate-950/40 border border-slate-800 rounded px-2 py-1">
+          <div class="text-slate-500">project_id</div>
+          <div class="text-slate-200 font-mono break-all">{{ session.project_id }}</div>
+        </div>
+        <div class="bg-slate-950/40 border border-slate-800 rounded px-2 py-1">
+          <div class="text-slate-500">skill / design system</div>
+          <div class="text-slate-200 font-mono break-all">{{ session.skill_id }} · {{ session.design_system_id }}</div>
+        </div>
+      </div>
+    {% else %}
+      <div class="text-xs text-slate-500">
+        如果长时间没有"bootstrap 完成"，OpenDesign daemon 可能没启起来。
+        到 OpenDesign tab 看错误（header 上 🎨 OpenDesign）。
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Adopted html_asset state -->
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-5 py-4 space-y-2">
+    <div class="flex items-baseline gap-2">
+      <span class="text-sm font-semibold text-slate-200">📁 html_asset/</span>
+      <span class="ml-auto"></span>
+      {% if adopted_count > 0 %}
+        <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300">
+          ✓ {{ adopted_count }} 文件已采纳
+        </span>
+      {% else %}
+        <span class="text-xs px-2 py-0.5 rounded bg-slate-700/50 border border-slate-600 text-slate-400">
+          未采纳
+        </span>
+      {% endif %}
+    </div>
+    {% if adopted_files %}
+      <ul class="text-xs text-slate-300 space-y-0.5 font-mono">
+        {% for f in adopted_files %}
+        <li>· {{ f }}</li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="text-xs text-slate-500">
+        到 OpenDesign tab 跟 agent 迭代到满意 → 点"采纳为 Hero" →
+        HTML 自动解到 <code>html_asset/</code>。然后回来按"完成 → Phase 3"。
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- Lower actions: enter OpenDesign tab for manual control, or skip whole step -->
+  <div class="flex items-center gap-2 flex-wrap pt-2 border-t border-slate-800/50">
+    <a href="/runs/{{ project }}/{{ run_id }}/opendesign"
+       class="inline-flex items-center gap-2 px-3 py-1.5 bg-violet-500/15 hover:bg-violet-500/25 border border-violet-500/40 text-violet-200 rounded text-xs">
+      <span>🎨</span><span>进 OpenDesign tab · 手动控制</span>
+    </a>
+
+    <span class="ml-auto"></span>
+
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/skip_opendesign"
+          hx-target="#action-result" hx-swap="innerHTML">
+      <button type="submit"
+              class="px-3 py-1.5 bg-slate-700/40 hover:bg-slate-700/60 border border-slate-600 text-slate-300 rounded text-xs">
+        ⏭ 完全跳过 OpenDesign · 只用录屏进 Phase 3
+      </button>
+    </form>
+  </div>
+</div>

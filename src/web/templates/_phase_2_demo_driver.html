@@ -95,6 +95,39 @@
       <div class="font-mono text-xs text-slate-200 break-all">{{ p.get('last_action', '—') }}</div>
     </div>
 
+    {# Live page preview — server saves a screenshot after every browser-* tool
+       call. JS polls every 2s and swaps the src with a cache-busting query
+       string so the <img> updates without full DOM replacement (no flicker). #}
+    {% if status == 'running' %}
+    <div class="bg-slate-950/60 rounded p-2">
+      <div class="flex items-baseline justify-between mb-1">
+        <span class="text-xs text-slate-500">🖥 Live preview · ~2s 延迟</span>
+        <span class="text-[10px] text-slate-600">每 2s 刷新</span>
+      </div>
+      <img id="demo-preview-img"
+           src="/runs/{{ project }}/{{ run_id }}/demo_preview?t=0"
+           alt="Demo Driver page preview"
+           class="w-full rounded border border-slate-800 bg-black"
+           onerror="this.style.opacity='0.3'; this.alt='等待 Driver 第一次 browser 动作...';"
+           onload="this.style.opacity='1';">
+      <script>
+        (function(){
+          if (window.__demoPreviewTimer) return;  // dedupe across swaps
+          window.__demoPreviewTimer = setInterval(function(){
+            var img = document.getElementById('demo-preview-img');
+            if (!img) {  // panel left the DOM, kill the timer
+              clearInterval(window.__demoPreviewTimer);
+              window.__demoPreviewTimer = null;
+              return;
+            }
+            var base = '/runs/{{ project }}/{{ run_id }}/demo_preview';
+            img.src = base + '?t=' + Date.now();
+          }, 2000);
+        })();
+      </script>
+    </div>
+    {% endif %}
+
     {% if p.get('pending_question') %}
       <div class="bg-amber-500/10 border border-amber-500/30 rounded px-3 py-2">
         <div class="text-xs text-amber-300">Driver 在等你回答</div>
@@ -176,7 +209,7 @@
   {# ────────────── completed → review + accept ────────────── #}
   {% if status == 'done' and demo_recording_exists %}
     <div class="border-t border-slate-800 pt-4 space-y-3">
-      <video src="/runs/{{ project }}/{{ run_id }}/file/recordings/demo.mp4"
+      <video src="/runs/{{ project }}/{{ run_id }}/artifacts/recordings/demo.mp4"
               controls class="w-full max-w-3xl rounded border border-slate-800"></video>
       <div class="flex items-center gap-3">
         <form hx-post="/runs/{{ project }}/{{ run_id }}/accept_demo"

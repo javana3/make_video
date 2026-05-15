@@ -72,6 +72,85 @@ def _fire_quality_judge(pipe: Pipeline, phase: str) -> None:
         pipe.log.warning(f"quality_judge[{phase}] could not schedule (no loop)")
 
 
+def _fire_opendesign_bootstrap(pipe: Pipeline) -> None:
+    """Auto-fire OpenDesign pipeline: bootstrap → first_turn → adopt → critic loop.
+
+    Called when Phase 2 recording is accepted. The full chain happens in the
+    background; UI polls opendesign/state.json (bootstrap done?) + opendesign
+    session history (first_turn done?) + od_critic_progress.json (critic running?).
+
+    Idempotent across each stage: if the session already exists, skip bootstrap.
+    If the first turn already ran, skip it. If the artifact already exists, skip
+    adopt. Critic always runs the full soft_max_iterations unless user takes over.
+    """
+    async def _go():
+        try:
+            from ..agents.opendesigner import bootstrap, load_session, iterate_stream, adopt
+            from ..tools.opendesign_lifecycle import ensure_daemon
+            from ..agents.od_critic import run_critic_loop
+
+            brief_path = pipe.run_dir / "project_brief.md"
+            if not brief_path.exists():
+                pipe.log.warning("opendesign pipeline skipped: no project_brief.md")
+                return
+
+            # 1. bootstrap (create session if absent)
+            existing = await asyncio.to_thread(load_session, pipe.run_dir)
+            if existing is None:
+                endpoint = await asyncio.to_thread(ensure_daemon)
+                brief = brief_path.read_text(encoding="utf-8")
+                await asyncio.to_thread(
+                    bootstrap, pipe.run_dir, endpoint, brief,
+                    f"{pipe.project}-promo",
+                )
+                pipe.log.info("opendesign: bootstrap done")
+            else:
+                pipe.log.info("opendesign: bootstrap session already exists, skipping")
+
+            # 2. first turn (only if no history)
+            sess = await asyncio.to_thread(load_session, pipe.run_dir)
+            if sess is None:
+                pipe.log.error("opendesign: session disappeared after bootstrap; abort")
+                return
+            if not sess.history:
+                pipe.log.info("opendesign: firing first_turn (initial_prompt)")
+                def _drain_first_turn():
+                    n = 0
+                    for _evt in iterate_stream(pipe.run_dir, timeout_s=1800.0):
+                        n += 1
+                    return n
+                n_evt = await asyncio.to_thread(_drain_first_turn)
+                pipe.log.info(f"opendesign: first_turn done, {n_evt} SSE events")
+            else:
+                pipe.log.info(f"opendesign: history already has {len(sess.history)} turn(s), skipping first_turn")
+
+            # 3. adopt (best-effort; critic loop also re-adopts each iter)
+            try:
+                await asyncio.to_thread(adopt, pipe.run_dir, "hero")
+                pipe.log.info("opendesign: initial adopt done")
+            except Exception as e:
+                pipe.log.warning(f"opendesign: initial adopt failed (critic loop will retry): {e}")
+
+            # 4. critic loop — fire only if not already done / running.
+            from ..agents.od_critic import read_progress
+            prev = await asyncio.to_thread(read_progress, pipe.run_dir)
+            if prev and prev.get("stage") == "done":
+                pipe.log.info("opendesign: critic loop already completed for this run")
+                return
+            pipe.log.info("opendesign: firing critic loop (soft_max=5)")
+            await asyncio.to_thread(run_critic_loop, pipe.run_dir, 5, None)
+            pipe.log.info("opendesign: critic loop finished")
+
+        except Exception as e:
+            pipe.log.exception(f"opendesign pipeline failed: {e}")
+            pipe.bus.emit("asset_failed", agent="agent6_opendesigner",
+                           error=str(e), error_type=type(e).__name__)
+    try:
+        asyncio.create_task(_go())
+    except RuntimeError:
+        pipe.log.warning("opendesign pipeline could not schedule (no loop)")
+
+
 def _fire_cross_phase_judge(pipe: Pipeline) -> None:
     """Fire the cross-phase consistency judge after all 4 source artifacts exist.
 
@@ -824,6 +903,29 @@ async def phase2_panel(project: str, run_id: str, request: Request):
     is_running = REGISTRY.is_running(run_id)
     progress_phase = (progress or {}).get("phase", "")
     progress_status = (progress or {}).get("status", "")
+    pipe_state = REGISTRY.get_or_load(project, run_id).state
+
+    # 0. OpenDesigner waiting — recording is in hand, HTML hero generation
+    # is the next gate before Phase 3 (Remotion compose). Default ON; user
+    # must explicitly click "取消 OpenDesign" to skip and jump straight to
+    # Phase 3 with only the recording.
+    if pipe_state.gate == "waiting_html":
+        from ..agents.opendesigner import load_session, list_artifacts
+        sess = load_session(run_dir)
+        artifacts = {}
+        try:
+            if sess is not None:
+                artifacts = list_artifacts(run_dir)
+        except Exception:
+            artifacts = {}
+        html_asset_dir = run_dir / "html_asset"
+        adopted_files = sorted(html_asset_dir.glob("*")) if html_asset_dir.exists() else []
+        return TEMPLATES.TemplateResponse(request, "_phase_2_opendesign_pending.html", {
+            "project": project, "run_id": run_id,
+            "session": sess, "artifacts": artifacts,
+            "adopted_count": len(adopted_files),
+            "adopted_files": [f.name for f in adopted_files][:10],
+        })
 
     # 1. Agent 2 planner running
     if is_running and progress_phase == "2a-plan" and progress_status == "running":
@@ -925,7 +1027,7 @@ async def phase2_panel(project: str, run_id: str, request: Request):
                 demo_timings_obj = None
 
         demo_state = {
-            "run_dir": str(pipe.run_dir),
+            "run_dir": str(run_dir),
             "demo_script_exists": demo_script_path.exists(),
             "demo_recording_exists": demo_recording_path.exists(),
             "demo_script": demo_script_obj,
@@ -1020,12 +1122,15 @@ async def accept_test(project: str, run_id: str):
     pipe.bus.emit("user_input", agent="pipeline", action="accept_test_recording",
                   window_title=accepted["window_title"])
     pipe.record_asset("recording_test", rec_dir / "test.mp4", verified=True, source="window_record")
-    pipe.transition(phase=3, gate="running")
+    # Route through OpenDesigner before Phase 3 — see accept_demo for rationale.
+    pipe.transition(phase=2, gate="waiting_html")
+    _fire_opendesign_bootstrap(pipe)
+    target_url = f"/runs/{project}/{run_id}"
     return HTMLResponse(
         '<div class="px-4 py-3 bg-emerald-500/20 border border-emerald-500/40 text-emerald-200 rounded">'
-        '✅ 录屏已接受 → Phase 3'
+        '✅ 录屏已接受 · 启动 OpenDesigner...'
         '</div>',
-        headers=_PHASE2_REFRESH,
+        headers={"HX-Redirect": target_url, "Location": target_url},
     )
 
 
@@ -1182,6 +1287,7 @@ async def retry_failed_phase(project: str, run_id: str):
     pipe.clear_error()
     pipe.transition(gate="running")
     pipe.log.info(f"user retry: {agent} → {auto}")
+    target_url = f"/runs/{project}/{run_id}"
 
     if auto == "clone+analyze":
         asyncio.create_task(_retry_clone_and_analyze(pipe))
@@ -1199,8 +1305,11 @@ async def retry_failed_phase(project: str, run_id: str):
         asyncio.create_task(_run_phase5_async(pipe, lang="zh-CN"))
 
     return HTMLResponse(
-        f'<div class="text-emerald-300 text-sm">⏳ 重试 <code>{agent}</code> 启动中...</div>',
-        headers={"HX-Trigger": "retry-started"},
+        f'<div class="text-emerald-300 text-sm">⏳ 重试 <code>{agent}</code> 启动中 · 跳转中...</div>',
+        # HX-Redirect = full page reload so user sees fresh state (banner gone,
+        # agent re-running, etc) — without this the retry happens but the page
+        # stays on the stale view and feels like "nothing happened".
+        headers={"HX-Redirect": target_url, "Location": target_url, "HX-Trigger": "retry-started"},
     )
 
 
@@ -1530,6 +1639,21 @@ async def iterate_panel(project: str, run_id: str, request: Request):
         "project": project, "run_id": run_id,
         "versions": versions,
     })
+
+
+@app.get("/runs/{project}/{run_id}/demo_preview")
+async def demo_preview(project: str, run_id: str):
+    """Latest Demo Driver page screenshot — refreshed after every browser-* tool
+    call. Used by the Phase 2c UI to show a ~2s-delay live preview without
+    pausing the recording. Returns 404 until the first screenshot lands."""
+    run_dir = WORKSPACE_ROOT / project / "runs" / run_id
+    p = run_dir / "demo_preview.png"
+    if not p.exists():
+        raise HTTPException(404, "no preview yet — Demo Driver may not have taken its first browser action")
+    return FileResponse(
+        p, media_type="image/png",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
 
 
 @app.get("/runs/{project}/{run_id}/artifacts/{rel_path:path}")
@@ -1873,13 +1997,22 @@ async def _record_demo_async(pipe: Pipeline, script_path: Path) -> None:
 # ────────────────────────────────────────────────────────────
 
 @app.post("/runs/{project}/{run_id}/run_phase3", response_class=HTMLResponse)
-async def run_phase3_route(project: str, run_id: str):
+async def run_phase3_route(project: str, run_id: str, feedback: str = Form("")):
     pipe = REGISTRY.get_or_load(project, run_id)
+    # Guard against concurrent fire: if a Phase 3 (or any agent) is already
+    # running for this run, refuse a second trigger. Otherwise rapid clicks
+    # spawn N concurrent renders / N concurrent BGM calls.
+    if REGISTRY.is_running(run_id):
+        return HTMLResponse(
+            '<div class="text-amber-300 text-sm py-2 px-3 bg-amber-500/10 border border-amber-500/30 rounded">'
+            '⏳ 已经在跑 — 等当前 phase 完成再触发（面板会自动刷新进度）'
+            '</div>', status_code=409,
+        )
     set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
     # Record start time so the panel can show "elapsed Xs" without parsing logs.
     import time as _time
     (pipe.run_dir / "phase3_started.txt").write_text(str(_time.time()), encoding="utf-8")
-    asyncio.create_task(_run_phase3_async(pipe))
+    asyncio.create_task(_run_phase3_async(pipe, feedback=feedback.strip() or None))
     return HTMLResponse(
         '<div class="text-amber-300 text-sm py-2 px-3 bg-amber-500/10 border border-amber-500/30 rounded">'
         '⏳ Phase 3 启动中 · 面板会自动刷新显示进度（~5-10min）'
@@ -2060,7 +2193,7 @@ async def phase3_panel(project: str, run_id: str, request: Request):
     })
 
 
-async def _run_phase3_async(pipe: Pipeline) -> None:
+async def _run_phase3_async(pipe: Pipeline, feedback: Optional[str] = None) -> None:
     await REGISTRY.mark_running(pipe.run_id, "phase3")
     try:
         set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
@@ -2090,27 +2223,39 @@ async def _run_phase3_async(pipe: Pipeline) -> None:
             "codec": v["codec_name"], "fps": v["r_frame_rate"],
         }
 
-        # Scan OpenDesigner outputs into available_assets
-        hyperframes = []
+        # Scan OpenDesigner outputs into available_assets. adopt(as_role='hero')
+        # for motion_film-mode sessions lands the mp4 at hero/intro.mp4 — copy
+        # it into hyperframes/ so the codegen's existing asset-staging path
+        # (which only looks at hyperframes/) picks it up uniformly.
         hyperframes_dir = run_dir / "hyperframes"
+        hero_intro = run_dir / "hero" / "intro.mp4"
+        if hero_intro.exists():
+            hyperframes_dir.mkdir(parents=True, exist_ok=True)
+            staged = hyperframes_dir / "intro.mp4"
+            if not staged.exists() or staged.stat().st_size != hero_intro.stat().st_size:
+                import shutil as _shutil
+                _shutil.copy2(hero_intro, staged)
+        hyperframes = []
+        mp4_sources: list[Path] = []
         if hyperframes_dir.exists():
-            for mp4 in sorted(hyperframes_dir.glob("*.mp4")):
-                try:
-                    hp = await asyncio.to_thread(shell_run, [
-                        ffprobe(), "-v", "quiet", "-print_format", "json",
-                        "-show_streams", "-show_format", str(mp4),
-                    ], check=True)
-                    hd = json.loads(hp.stdout)
-                    hv = next((s for s in hd["streams"] if s["codec_type"] == "video"), {})
-                    rel = str(mp4.relative_to(run_dir)).replace("\\", "/")
-                    hyperframes.append({
-                        "source_path": rel,
-                        "duration_s": float(hd["format"].get("duration", 0)),
-                        "width": int(hv.get("width", 0)),
-                        "height": int(hv.get("height", 0)),
-                    })
-                except Exception:
-                    continue
+            mp4_sources.extend(sorted(hyperframes_dir.glob("*.mp4")))
+        for mp4 in mp4_sources:
+            try:
+                hp = await asyncio.to_thread(shell_run, [
+                    ffprobe(), "-v", "quiet", "-print_format", "json",
+                    "-show_streams", "-show_format", str(mp4),
+                ], check=True)
+                hd = json.loads(hp.stdout)
+                hv = next((s for s in hd["streams"] if s["codec_type"] == "video"), {})
+                rel = str(mp4.relative_to(run_dir)).replace("\\", "/")
+                hyperframes.append({
+                    "source_path": rel,
+                    "duration_s": float(hd["format"].get("duration", 0)),
+                    "width": int(hv.get("width", 0)),
+                    "height": int(hv.get("height", 0)),
+                })
+            except Exception:
+                continue
 
         html_pages = []
         html_dir = run_dir / "html_asset"
@@ -2148,6 +2293,7 @@ async def _run_phase3_async(pipe: Pipeline) -> None:
             run_dir=run_dir, project_brief=brief,
             available_assets=available_assets, output_path=plan_path,
             progress_path=run_dir / "progress.json",
+            feedback=feedback,
         )
         plan = json.loads(plan_path.read_text(encoding="utf-8"))
         _fire_quality_judge(pipe, "cutting_plan")
@@ -2180,6 +2326,164 @@ async def _run_phase3_async(pipe: Pipeline) -> None:
         await REGISTRY.mark_done(pipe.run_id)
 
 
+@app.post("/runs/{project}/{run_id}/skip_opendesign", response_class=HTMLResponse)
+async def skip_opendesign(project: str, run_id: str):
+    """User explicit opt-out — advance to Phase 3 without HTML hero.
+
+    Default behavior is opposite: after recording, OpenDesigner runs to
+    produce HTML for the Remotion compose step. If the user doesn't want
+    that (faster, recording-only video), they click "取消 OpenDesign" and
+    we transition directly to phase=3.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    if pipe.state.phase != 2 or pipe.state.gate != "waiting_html":
+        raise HTTPException(
+            400,
+            f"skip_opendesign requires phase=2/waiting_html, current={pipe.state.phase}/{pipe.state.gate}",
+        )
+    pipe.bus.emit("user_input", agent="pipeline",
+                   action="skip_opendesign", phase=2)
+    pipe.transition(phase=3, gate="running")
+    target_url = f"/runs/{project}/{run_id}"
+    return HTMLResponse(
+        '<div class="text-amber-300 text-sm py-2">⏭ 跳过 OpenDesign · 直接进 Phase 3（只用录屏）</div>',
+        headers={"HX-Redirect": target_url, "Location": target_url},
+    )
+
+
+@app.post("/runs/{project}/{run_id}/accept_opendesign", response_class=HTMLResponse)
+async def accept_opendesign(project: str, run_id: str):
+    """User done iterating with OpenDesigner — advance to Phase 3.
+
+    Requires html_asset/*.html to exist (i.e., user already clicked
+    "采纳为 Hero" in the /opendesign tab, which copies the HTML into
+    html_asset/). If not adopted yet, returns 400 with a hint.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    if pipe.state.phase != 2 or pipe.state.gate != "waiting_html":
+        raise HTTPException(
+            400,
+            f"accept_opendesign requires phase=2/waiting_html, current={pipe.state.phase}/{pipe.state.gate}",
+        )
+    # OpenDesign can produce EITHER static_hero (html_asset/*.html) OR
+    # motion_film (hero/intro.mp4 or hyperframes/*.mp4). Accept any of those —
+    # the agent chose the mode that fit the brief.
+    html_dir = pipe.run_dir / "html_asset"
+    html_files = list(html_dir.glob("*.html")) if html_dir.exists() else []
+    hero_mp4 = pipe.run_dir / "hero" / "intro.mp4"
+    hyper_dir = pipe.run_dir / "hyperframes"
+    hyper_mp4s = list(hyper_dir.glob("*.mp4")) if hyper_dir.exists() else []
+    n_assets = len(html_files) + (1 if hero_mp4.exists() else 0) + len(hyper_mp4s)
+    if n_assets == 0:
+        raise HTTPException(
+            400,
+            "no OpenDesign asset adopted yet — 到 /opendesign tab 点 '采纳为 Hero' "
+            "（mp4 落在 hero/intro.mp4，html 落在 html_asset/）再回来",
+        )
+    summary = (
+        f"{len(html_files)} HTML"
+        + (f", hero mp4" if hero_mp4.exists() else "")
+        + (f", {len(hyper_mp4s)} hyperframe mp4" if hyper_mp4s else "")
+    )
+    pipe.bus.emit("user_input", agent="pipeline",
+                   action="accept_opendesign",
+                   html_count=len(html_files),
+                   hero_mp4=hero_mp4.exists(),
+                   hyperframes_count=len(hyper_mp4s))
+    pipe.transition(phase=3, gate="running")
+    target_url = f"/runs/{project}/{run_id}"
+    return HTMLResponse(
+        f'<div class="text-emerald-400 text-sm py-2">✅ 已采纳 OpenDesign ({summary}) → Phase 3</div>',
+        headers={"HX-Redirect": target_url, "Location": target_url},
+    )
+
+
+# ────────────────────────────────────────────────────────────
+# OpenDesign Critic — Agent 6b
+# ────────────────────────────────────────────────────────────
+
+@app.post("/runs/{project}/{run_id}/opendesign/critic_loop",
+           response_class=HTMLResponse)
+async def opendesign_critic_loop_route(project: str, run_id: str,
+                                        user_hint: str = Form(""),
+                                        soft_max: int = Form(5)):
+    """Fire a fresh critic loop in the background.
+
+    Use cases (all routed here):
+      - 🔄 让 critic 再改一轮  → no user_hint
+      - 📝 我说一句              → with user_hint set
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    if pipe.state.phase != 2 or pipe.state.gate != "waiting_html":
+        raise HTTPException(
+            400,
+            f"opendesign critic_loop requires phase=2/waiting_html, "
+            f"current={pipe.state.phase}/{pipe.state.gate}",
+        )
+
+    async def _go():
+        try:
+            from ..agents.od_critic import run_critic_loop
+            await asyncio.to_thread(
+                run_critic_loop, pipe.run_dir,
+                int(soft_max), (user_hint.strip() or None),
+            )
+        except Exception as e:
+            pipe.log.exception(f"critic loop failed: {e}")
+    asyncio.create_task(_go())
+
+    msg = "🎯 critic loop 再启 (no hint)" if not user_hint.strip() else f"📝 critic loop 启 with hint: {user_hint[:80]}"
+    return HTMLResponse(
+        f'<div class="text-amber-300 text-sm py-2">{msg} · 看下方进度</div>',
+        headers={"HX-Trigger": "opendesign-critic-refresh"},
+    )
+
+
+@app.post("/runs/{project}/{run_id}/opendesign/satisfied",
+           response_class=HTMLResponse)
+async def opendesign_satisfied_route(project: str, run_id: str):
+    """User accepts the current artifact (critic loop result OR raw)
+    and advances to Phase 3. Delegates to accept_opendesign behavior."""
+    return await accept_opendesign(project, run_id)
+
+
+@app.get("/runs/{project}/{run_id}/opendesign/critic_state")
+async def opendesign_critic_state_route(project: str, run_id: str):
+    """Return the current critic loop progress (raw JSON, for polling)."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..agents.od_critic import read_progress
+    data = read_progress(pipe.run_dir)
+    return data or {"stage": "not_started"}
+
+
+@app.get("/runs/{project}/{run_id}/opendesign/critic_panel",
+          response_class=HTMLResponse)
+async def opendesign_critic_panel_route(project: str, run_id: str,
+                                         request: Request):
+    """Inner panel for the OpenDesign pending screen — shows critic state
+    + history + 3 user buttons. Polled by HTMX every ~3s."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    from ..agents.od_critic import read_progress
+    from ..agents.opendesigner import load_session
+    crit = read_progress(pipe.run_dir) or {"stage": "not_started"}
+    sess = load_session(pipe.run_dir)
+    artifact_kind = crit.get("final_artifact_kind") or ""
+    artifact_path = crit.get("final_artifact") or ""
+    # if loop still running, peek at most recent iteration's artifact_path
+    if not artifact_path and crit.get("iterations"):
+        last = crit["iterations"][-1]
+        artifact_kind = last.get("artifact_kind", "")
+        artifact_path = last.get("artifact_path", "")
+    return TEMPLATES.TemplateResponse(request, "_phase_2_od_critic.html", {
+        "project": project, "run_id": run_id,
+        "session": sess.__dict__ if sess else None,
+        "crit": crit,
+        "artifact_kind": artifact_kind,
+        "artifact_path": artifact_path,
+    })
+
+
 @app.post("/runs/{project}/{run_id}/accept_phase3", response_class=HTMLResponse)
 async def accept_phase3(project: str, run_id: str):
     pipe = REGISTRY.get_or_load(project, run_id)
@@ -2189,8 +2493,11 @@ async def accept_phase3(project: str, run_id: str):
     if not v1.exists():
         raise HTTPException(400, "outputs/v1.mp4 not produced yet — run Phase 3 first")
     pipe.transition(phase=4, gate="running")
-    return HTMLResponse('<div class="text-emerald-400 text-sm">✅ Phase 3 通过 → Phase 4</div>',
-                          headers={"HX-Trigger": "phase-refresh"})
+    target_url = f"/runs/{project}/{run_id}"
+    return HTMLResponse(
+        '<div class="text-emerald-400 text-sm">✅ Phase 3 通过 → Phase 4 · 跳转中...</div>',
+        headers={"HX-Redirect": target_url, "Location": target_url},
+    )
 
 
 # ────────────────────────────────────────────────────────────
@@ -2200,17 +2507,75 @@ async def accept_phase3(project: str, run_id: str):
 @app.post("/runs/{project}/{run_id}/run_phase4", response_class=HTMLResponse)
 async def run_phase4_route(project: str, run_id: str):
     pipe = REGISTRY.get_or_load(project, run_id)
+    if REGISTRY.is_running(run_id):
+        return HTMLResponse(
+            '<div class="text-amber-300 text-sm py-2 px-3 bg-amber-500/10 border border-amber-500/30 rounded">'
+            '⏳ 已经在跑 — 等当前 phase 完成再触发（MiniMax 云端有时要 2-3 分钟）'
+            '</div>', status_code=409,
+        )
     set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    import time as _time
+    (pipe.run_dir / "phase4_started.txt").write_text(str(_time.time()), encoding="utf-8")
     asyncio.create_task(_run_phase4_async(pipe))
-    return HTMLResponse('<div class="text-amber-300 text-sm py-2">⏳ Phase 4 · BGM scaffold + MusicGen + mux...</div>',
-                          headers={"HX-Trigger": "phase4-refresh"})
+    return HTMLResponse(
+        '<div class="text-amber-300 text-sm py-2 px-3 bg-amber-500/10 border border-amber-500/30 rounded">'
+        '⏳ Phase 4 启动中 · 面板会自动刷新显示进度（~1-3 min CUDA）'
+        '</div>',
+        headers={"HX-Trigger": "phase4-refresh"},
+    )
+
+
+@app.get("/runs/{project}/{run_id}/phase4_panel", response_class=HTMLResponse)
+async def phase4_panel(project: str, run_id: str, request: Request):
+    """Live Phase-4 panel — polled every 3s by _phase_4.html.
+
+    Surfaces: is_running flag, elapsed time, BGM scaffold + MusicGen status,
+    v1_bgm_final.mp4 existence. Same UX pattern as phase3_panel.
+    """
+    pipe = REGISTRY.get_or_load(project, run_id)
+    run_dir = pipe.run_dir
+    is_running = REGISTRY.is_running(run_id)
+
+    started_at = None
+    started_path = run_dir / "phase4_started.txt"
+    if started_path.exists():
+        try:
+            started_at = float(started_path.read_text(encoding="utf-8").strip())
+        except Exception:
+            pass
+    import time as _time
+    elapsed_s = int(_time.time() - started_at) if started_at else None
+
+    bgm_musicgen = run_dir / "bgm" / "musicgen.wav"  # MusicGen output
+    bgm_minimax = run_dir / "bgm" / "minimax.wav"  # MiniMax output
+    bgm_final = run_dir / "bgm" / "bgm_final.wav"  # whichever path produced it
+    v1_bgm = run_dir / "outputs" / "v1_bgm_final.mp4"
+    v1 = run_dir / "outputs" / "v1.mp4"
+
+    return TEMPLATES.TemplateResponse(request, "_phase_4_panel.html", {
+        "project": project, "run_id": run_id,
+        "is_running": is_running,
+        "elapsed_s": elapsed_s,
+        "musicgen_exists": bgm_musicgen.exists() or bgm_final.exists(),
+        "minimax_exists": bgm_minimax.exists() or bgm_final.exists(),
+        "v1_bgm_exists": v1_bgm.exists(),
+        "v1_bgm_size_mb": round(v1_bgm.stat().st_size / 1024 / 1024, 2) if v1_bgm.exists() else 0,
+        "v1_exists": v1.exists(),
+        "last_error": pipe.state.last_error,
+        "state_gate": pipe.state.gate,
+    })
 
 
 async def _run_phase4_async(pipe: Pipeline) -> None:
     await REGISTRY.mark_running(pipe.run_id, "phase4")
     try:
         set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
-        from ..tools.bgm_scaffold import generate_scaffold
+        # Phase 4 = call BGM generator directly, no python-side scaffolding.
+        # The old M4a step synthesized a numpy kick/snare/hihat track to feed
+        # into musicgen-melody as a melody guide; that approach is gone.
+        # MiniMax music-2.6 (the default path) ignored the scaffold anyway,
+        # and forcing the result toward a 4-on-the-floor pattern made every
+        # video sound like a stock demo. Now: prompt → BGM, that's it.
         from ..tools.bgm_musicgen import generate_bgm, build_prompt_from_brief
         from ..tools.bgm_minimax import generate_bgm_minimax, has_minimax_key
         from ..tools.bgm_mux import mux_bgm
@@ -2220,21 +2585,27 @@ async def _run_phase4_async(pipe: Pipeline) -> None:
         plan = json.loads((run_dir / "cutting_plan.json").read_text(encoding="utf-8"))
         brief = (run_dir / "project_brief.md").read_text(encoding="utf-8")
 
-        # M4a · scaffold
-        scaffold = run_dir / "bgm" / "bgm_scaffold.wav"
-        r1 = await asyncio.to_thread(generate_scaffold, plan, scaffold, 120)
+        # Compute target BGM duration from cutting_plan (sum of scene durations
+        # minus the 15-frame crossfade overlap between consecutive scenes).
+        fps = plan.get("fps", 30)
+        scenes = plan.get("scenes", [])
+        total_frames = 0
+        for i, sc in enumerate(scenes):
+            total_frames += int(sc["duration_s"] * fps)
+            if i < len(scenes) - 1:
+                total_frames -= 15
+        total_s = total_frames / fps if total_frames > 0 else 30.0
 
-        # M4b · BGM generation
-        # Prefer MiniMax music-2.6 (cloud, ~10-30s) over local MusicGen (CPU 5-10min).
-        # If MINIMAX_API_KEY missing or the call fails, fall back to local MusicGen.
-        bgm_final = run_dir / "bgm" / "bgm_final.wav"
+        bgm_dir = run_dir / "bgm"
+        bgm_dir.mkdir(parents=True, exist_ok=True)
+        bgm_final = bgm_dir / "bgm_final.wav"
         prompt = build_prompt_from_brief(brief, bpm=120)
         used_minimax = False
         if has_minimax_key():
             try:
                 await asyncio.to_thread(
                     generate_bgm_minimax,
-                    scaffold, bgm_final, prompt, r1["duration_s"],
+                    None, bgm_final, prompt, total_s,
                 )
                 used_minimax = True
             except Exception as mm_err:
@@ -2246,10 +2617,11 @@ async def _run_phase4_async(pipe: Pipeline) -> None:
                 model_arg = local_model
             else:
                 model_arg = "facebook/musicgen-small"
+            # use_melody=False — prompt-only generation (no scaffold input).
             await asyncio.to_thread(
                 generate_bgm,
-                scaffold, bgm_final, prompt,
-                r1["duration_s"], model_arg, None, False,
+                None, bgm_final, prompt,
+                total_s, model_arg, None, False,
             )
 
         # M4c · mux
@@ -2278,8 +2650,11 @@ async def accept_phase4(project: str, run_id: str):
     if not v1bgm.exists():
         raise HTTPException(400, "outputs/v1_bgm_final.mp4 not produced yet — run Phase 4 first")
     pipe.transition(phase=5, gate="running")
-    return HTMLResponse('<div class="text-emerald-400 text-sm">✅ Phase 4 通过 → Phase 5</div>',
-                          headers={"HX-Trigger": "phase-refresh"})
+    target_url = f"/runs/{project}/{run_id}"
+    return HTMLResponse(
+        '<div class="text-emerald-400 text-sm">✅ Phase 4 通过 → Phase 5 · 跳转中...</div>',
+        headers={"HX-Redirect": target_url, "Location": target_url},
+    )
 
 
 # ────────────────────────────────────────────────────────────
@@ -2289,10 +2664,81 @@ async def accept_phase4(project: str, run_id: str):
 @app.post("/runs/{project}/{run_id}/run_phase5", response_class=HTMLResponse)
 async def run_phase5_route(project: str, run_id: str, lang: str = Form("zh-CN")):
     pipe = REGISTRY.get_or_load(project, run_id)
+    if REGISTRY.is_running(run_id):
+        return HTMLResponse(
+            '<div class="text-amber-300 text-sm py-2 px-3 bg-amber-500/10 border border-amber-500/30 rounded">'
+            '⏳ 已经在跑 — 等当前 phase 完成（edge-tts 大约 30-60s）'
+            '</div>', status_code=409,
+        )
     set_run_context(pipe.run_id, pipe.bus, pipe.run_dir)
+    import time as _time
+    (pipe.run_dir / "phase5_started.txt").write_text(str(_time.time()), encoding="utf-8")
+    (pipe.run_dir / "phase5_running_lang.txt").write_text(lang, encoding="utf-8")
     asyncio.create_task(_run_phase5_async(pipe, lang))
-    return HTMLResponse(f'<div class="text-amber-300 text-sm py-2">⏳ Phase 5 · script + edge-tts + ducking ({lang})...</div>',
-                          headers={"HX-Trigger": "phase5-refresh"})
+    return HTMLResponse(
+        f'<div class="text-amber-300 text-sm py-2 px-3 bg-amber-500/10 border border-amber-500/30 rounded">'
+        f'⏳ Phase 5 启动中 · {lang} · 面板会自动刷新显示进度（~30-60s）'
+        f'</div>',
+        headers={"HX-Trigger": "phase5-refresh"},
+    )
+
+
+@app.get("/runs/{project}/{run_id}/phase5_panel", response_class=HTMLResponse)
+async def phase5_panel(project: str, run_id: str, request: Request):
+    """Live Phase-5 panel — polled every 3s by _phase_5.html."""
+    pipe = REGISTRY.get_or_load(project, run_id)
+    run_dir = pipe.run_dir
+    is_running = REGISTRY.is_running(run_id)
+
+    started_at = None
+    started_path = run_dir / "phase5_started.txt"
+    if started_path.exists():
+        try:
+            started_at = float(started_path.read_text(encoding="utf-8").strip())
+        except Exception:
+            pass
+    import time as _time
+    elapsed_s = int(_time.time() - started_at) if started_at else None
+
+    running_lang = None
+    lang_path = run_dir / "phase5_running_lang.txt"
+    if lang_path.exists():
+        running_lang = lang_path.read_text(encoding="utf-8").strip()
+
+    voice_dir = run_dir / "voice"
+    bilingual = voice_dir / "voiceover_script_bilingual.json"
+    final_zh = run_dir / "outputs" / "final_zh-CN.mp4"
+    final_en = run_dir / "outputs" / "final_en-US.mp4"
+
+    # Per-language step states — count rendered segment files for "tts" step
+    zh_seg = voice_dir / "per_segment_zh-CN"
+    en_seg = voice_dir / "per_segment_en-US"
+    zh_full = voice_dir / "voice_full_zh-CN.wav"
+    en_full = voice_dir / "voice_full_en-US.wav"
+
+    def _segs(d): return len(list(d.glob("*.mp3")) + list(d.glob("*.wav"))) if d.exists() else 0
+
+    v1_bgm = run_dir / "outputs" / "v1_bgm_final.mp4"
+    v1 = run_dir / "outputs" / "v1.mp4"
+
+    return TEMPLATES.TemplateResponse(request, "_phase_5_panel.html", {
+        "project": project, "run_id": run_id,
+        "is_running": is_running,
+        "elapsed_s": elapsed_s,
+        "running_lang": running_lang,
+        "bilingual_exists": bilingual.exists(),
+        "zh_segments": _segs(zh_seg),
+        "en_segments": _segs(en_seg),
+        "zh_full_exists": zh_full.exists(),
+        "en_full_exists": en_full.exists(),
+        "final_zh_exists": final_zh.exists(),
+        "final_en_exists": final_en.exists(),
+        "zh_size_mb": round(final_zh.stat().st_size / 1024 / 1024, 2) if final_zh.exists() else 0,
+        "en_size_mb": round(final_en.stat().st_size / 1024 / 1024, 2) if final_en.exists() else 0,
+        "v1_bgm_exists": v1_bgm.exists(),
+        "last_error": pipe.state.last_error,
+        "state_gate": pipe.state.gate,
+    })
 
 
 async def _run_phase5_async(pipe: Pipeline, lang: str = "zh-CN") -> None:
@@ -2461,10 +2907,20 @@ async def accept_cli_route(project: str, run_id: str):
     await asyncio.to_thread(_sh.copy2, src, target)
     pipe.record_asset("recording_test", target, verified=True, source="cli_recorder")
     pipe.bus.emit("asset_verified", agent="pipeline", name="recording_test", path=str(target))
-    pipe.transition(phase=3, gate="running")
+    # Write accepted_window.json so phase2_panel doesn't keep serving the
+    # stale "窗口对，进 M2c" button.
+    (pipe.run_dir / "accepted_window.json").write_text(json.dumps({
+        "source": "cli_recorder",
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
+        "test_recording": str(target),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Route through OpenDesigner before Phase 3 — see accept_demo for rationale.
+    pipe.transition(phase=2, gate="waiting_html")
+    _fire_opendesign_bootstrap(pipe)
+    target_url = f"/runs/{project}/{run_id}"
     return HTMLResponse(
-        '<div class="text-emerald-400 text-sm py-2">✅ 已采纳 → Phase 3</div>',
-        headers={"HX-Trigger": "phase-refresh"},
+        '<div class="text-emerald-400 text-sm py-2">✅ 已采纳 · 启动 OpenDesigner...</div>',
+        headers={"HX-Redirect": target_url, "Location": target_url},
     )
 
 
@@ -2488,23 +2944,35 @@ def _driver_context(run_dir: Path) -> dict:
     }
 
 
-def _detect_demo_mode(plan: dict) -> tuple[str, Optional[str], Optional[list], Optional[str]]:
-    """Heuristic: if first service has health_url it's web mode; else cli."""
-    services = plan.get("services") or []
-    if services:
-        s = services[0]
-        url = s.get("health_url") or ""
-        if url.startswith("http://"):
-            # Use the host:port root, not the health probe path
-            from urllib.parse import urlparse
-            p = urlparse(url)
-            base = f"{p.scheme}://{p.netloc}/"
-            return "web", base, None, None
-        # service exists but no usable health_url → still try cli with its command
-        import shlex
-        return "cli", None, shlex.split(s.get("command") or ""), s.get("cwd") or "./"
-    # no services declared — undefined; UI will require user to pick
-    return "cli", None, None, "./"
+def _read_demo_targets(plan: dict) -> tuple[str, Optional[str], Optional[list], Optional[str]]:
+    """Read demo mode + targets from the plan the Planner agent already decided.
+
+    IRON LAW: NO state machine here. The Planner explicitly sets
+    `demo_mode` ('web'|'cli') in setup_plan.json — we just respect it.
+    Returns (mode, web_url, cli_command_argv, cli_cwd).
+    """
+    import shlex
+    from urllib.parse import urlparse
+
+    mode = plan.get("demo_mode") or ""
+    if mode == "web":
+        # Take the first service's health_url as the web entry point.
+        services = plan.get("services") or []
+        if services:
+            url = services[0].get("health_url") or ""
+            if url.startswith("http://") or url.startswith("https://"):
+                p = urlparse(url)
+                return "web", f"{p.scheme}://{p.netloc}/", None, None
+        return "web", None, None, None
+    if mode == "cli":
+        cmd_str = plan.get("demo_command") or ""
+        cwd = plan.get("demo_cwd") or "./"
+        argv = shlex.split(cmd_str) if cmd_str.strip() else None
+        return "cli", None, argv, cwd
+    # Plan is missing demo_mode (older plan written before the field existed).
+    # Don't guess — return empty mode; the route will tell the user to either
+    # re-plan or pick a mode manually.
+    return "", None, None, None
 
 
 @app.post("/runs/{project}/{run_id}/run_demo_driver", response_class=HTMLResponse)
@@ -2534,23 +3002,28 @@ async def run_demo_driver_route(project: str, run_id: str,
         except Exception:
             plan = {}
 
-    # Auto-detect mode + targets if user didn't specify
-    auto_mode, auto_url, auto_cmd, auto_cwd = _detect_demo_mode(plan)
-    chosen_mode = mode or auto_mode
-    chosen_url = web_url or auto_url
+    # Read mode + targets from the plan the Planner agent already picked.
+    # The form fields (mode / web_url / cli_command / cli_cwd) are still honored
+    # if the user wants to override, but we never AUTO-INFER mode anymore.
+    plan_mode, plan_url, plan_cmd, plan_cwd = _read_demo_targets(plan)
+    chosen_mode = mode or plan_mode
+    chosen_url = web_url or plan_url
     if cli_command:
         import shlex
         chosen_cmd = shlex.split(cli_command)
     else:
-        chosen_cmd = auto_cmd
-    chosen_cwd = cli_cwd or auto_cwd or "./"
+        chosen_cmd = plan_cmd
+    chosen_cwd = cli_cwd or plan_cwd or "./"
 
+    if not chosen_mode:
+        return HTMLResponse(
+            '<div class="text-rose-400 text-sm">setup_plan.json 没有 <code>demo_mode</code> 字段——这是用 旧版 Planner 跑的 plan。重新跑 Phase 2 plan 就好。</div>', 400)
     if chosen_mode == "web" and not chosen_url:
         return HTMLResponse(
-            '<div class="text-rose-400 text-sm">web 模式缺 URL（setup_plan 里没 health_url）</div>', 400)
+            '<div class="text-rose-400 text-sm">web 模式缺 URL（setup_plan.services 为空且未在表单填写）</div>', 400)
     if chosen_mode == "cli" and not chosen_cmd:
         return HTMLResponse(
-            '<div class="text-rose-400 text-sm">cli 模式缺 command（setup_plan.services 为空，前端请填）</div>', 400)
+            '<div class="text-rose-400 text-sm">cli 模式缺 command（setup_plan.demo_command 为空且未在表单填写）</div>', 400)
 
     # Read project_brief for tone context (NOT a checklist for demo content)
     brief_path = pipe.run_dir / "project_brief.md"
@@ -2695,12 +3168,28 @@ async def accept_demo_route(project: str, run_id: str):
         # Score the demo captions before they get folded into Phase 3 — gives
         # the user a quality signal on the demo BEFORE committing to Remotion.
         _fire_quality_judge(pipe, "demo_captions")
+    # Write accepted_window.json so phase2_panel's stale-state heuristic
+    # (test.mp4 exists && accepted_window.json missing → render M2b
+    # test_done partial) doesn't keep serving the old "窗口对，进 M2c"
+    # button after we've already moved on.
+    accepted_path = pipe.run_dir / "accepted_window.json"
+    accepted_path.write_text(json.dumps({
+        "source": "demo_driver",
+        "accepted_at": datetime.now(timezone.utc).isoformat(),
+        "test_recording": str(target),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
     pipe.bus.emit("asset_verified", agent="pipeline",
                    name="recording_test", path=str(target))
-    pipe.transition(phase=3, gate="running")
+    # Phase 2 → Phase 3 transition now goes through OpenDesigner. Recording
+    # is in hand; next step is HTML hero generation (default ON; user must
+    # explicitly click "跳过 OpenDesign" to bypass). After user adopts the
+    # HTML (or skips), the page advances to phase=3.
+    pipe.transition(phase=2, gate="waiting_html")
+    _fire_opendesign_bootstrap(pipe)
+    target_url = f"/runs/{project}/{run_id}"
     return HTMLResponse(
-        '<div class="text-emerald-400 text-sm py-2">✅ 已采纳 Demo → Phase 3</div>',
-        headers={"HX-Trigger": "phase-refresh"},
+        '<div class="text-emerald-400 text-sm py-2">✅ 已采纳 Demo · 启动 OpenDesigner...</div>',
+        headers={"HX-Redirect": target_url, "Location": target_url},
     )
 
 

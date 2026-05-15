@@ -1,0 +1,180 @@
+{# Inner critic panel — polled every 3s by _phase_2_opendesign_pending.html.
+   Shows critic loop progress + history + preview + the 3 user buttons. #}
+
+{% set stage = crit.get('stage', 'not_started') %}
+{% set iters = crit.get('iterations', []) %}
+{% set last = iters[-1] if iters else None %}
+{% set running = stage in ('starting', 'adopt+critique', 'verdict_in', 'opendesign_retrying') %}
+
+<div class="space-y-4">
+
+  {# ─── header / status badge ─── #}
+  <div class="rounded-lg border-2 border-purple-500/40 bg-purple-950/20 px-5 py-4">
+    <div class="flex items-baseline gap-2 flex-wrap mb-2">
+      <span class="text-base">🎨</span>
+      <span class="text-base font-semibold text-purple-200">OpenDesign · Critic Agent</span>
+      <span class="ml-auto"></span>
+      {% if stage == 'not_started' %}
+        <span class="text-xs px-2 py-0.5 rounded bg-slate-700/50 border border-slate-600 text-slate-300">未启动</span>
+      {% elif running %}
+        <span class="text-xs px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300">
+          <span class="inline-block w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse mr-1"></span>
+          {{ stage }} · iter {{ crit.get('current_iteration', 0) }}/{{ crit.get('soft_max_iterations', 5) }}
+        </span>
+      {% elif stage == 'done' %}
+        {% set st = crit.get('status', 'unknown') %}
+        {% if st == 'passed' %}
+        <span class="text-xs px-2 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300">
+          ✓ critic 通过 · {{ iters|length }} 轮
+        </span>
+        {% elif st == 'soft_cap' %}
+        <span class="text-xs px-2 py-0.5 rounded bg-sky-500/20 border border-sky-500/40 text-sky-300">
+          ⌛ 上限 {{ crit.get('soft_max_iterations', 5) }} 轮到了 · 让你拍板
+        </span>
+        {% elif st == 'needs_user' %}
+        <span class="text-xs px-2 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-300">
+          ❓ critic 说不出该怎么改 · 让你拍板
+        </span>
+        {% else %}
+        <span class="text-xs px-2 py-0.5 rounded bg-rose-500/20 border border-rose-500/40 text-rose-300">
+          ✗ critic 出错 · {{ crit.get('error', '') }}
+        </span>
+        {% endif %}
+      {% endif %}
+    </div>
+    <p class="text-xs text-slate-400">
+      艺术总监 Agent 自动看 OpenDesign 出货、打分、找问题、写改稿指令送回，循环直到通过或撞上限 ({{ crit.get('soft_max_iterations', 5) }} 轮)。
+      你可以随时点 <strong>满意</strong> 跳过剩余迭代直接进 Phase 3。
+    </p>
+  </div>
+
+  {# ─── latest verdict (the headline) ─── #}
+  {% if last %}
+  <div class="rounded-lg border border-slate-800 bg-slate-900/40 px-5 py-4 space-y-3">
+    <div class="flex items-baseline gap-2 flex-wrap">
+      <span class="text-sm font-semibold text-slate-200">最新评判 · iter #{{ last.iteration }}</span>
+      <span class="ml-auto"></span>
+      <span class="text-xs font-mono px-2 py-0.5 rounded
+        {% if last.verdict == 'pass' %}bg-emerald-500/20 border border-emerald-500/40 text-emerald-300
+        {% else %}bg-rose-500/20 border border-rose-500/40 text-rose-300{% endif %}">
+        {{ last.verdict }} · {{ last.score }}/10
+      </span>
+    </div>
+    {% if last.overall %}
+    <div class="text-sm text-slate-200 italic">"{{ last.overall }}"</div>
+    {% endif %}
+    {% if last.issues %}
+    <div>
+      <div class="text-xs text-slate-500 mb-1">具体问题：</div>
+      <ul class="text-xs text-slate-300 list-disc list-inside space-y-0.5">
+        {% for iss in last.issues %}
+        <li>{{ iss }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% if last.revision_prompt and last.verdict == 'fail' %}
+    <details class="text-xs">
+      <summary class="cursor-pointer text-slate-500 hover:text-slate-300">
+        🔧 看 critic 送给 OpenDesign 的改稿指令 ({{ last.revision_prompt|length }} 字)
+      </summary>
+      <pre class="mt-2 bg-black/40 border border-slate-800 rounded p-2 whitespace-pre-wrap font-mono text-slate-300">{{ last.revision_prompt }}</pre>
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# ─── preview of the current artifact ─── #}
+  {% if artifact_path %}
+  <div class="rounded-lg border border-slate-800 bg-slate-950/40 p-3 space-y-2">
+    <div class="text-xs text-slate-500">当前预览 · <code>{{ artifact_path }}</code></div>
+    {% if artifact_kind == 'mp4' %}
+      <video src="/runs/{{ project }}/{{ run_id }}/artifacts/{{ artifact_path }}"
+             controls preload="metadata"
+             class="w-full max-h-[50vh] rounded bg-black"></video>
+    {% elif artifact_kind == 'html' %}
+      <iframe src="/runs/{{ project }}/{{ run_id }}/artifacts/{{ artifact_path }}"
+              sandbox="allow-scripts"
+              class="w-full h-[50vh] rounded bg-white border-0"></iframe>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {# ─── history (collapsed) ─── #}
+  {% if iters|length > 1 %}
+  <details class="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-2">
+    <summary class="cursor-pointer text-xs text-slate-500 hover:text-slate-300">
+      📜 历史评判 ({{ iters|length }} 轮)
+    </summary>
+    <ul class="mt-2 space-y-2 text-xs">
+      {% for v in iters %}
+      <li class="border-l-2 pl-3 py-0.5
+                 {% if v.verdict == 'pass' %}border-emerald-500/40{% else %}border-rose-500/40{% endif %}">
+        <span class="font-mono text-slate-400">iter#{{ v.iteration }}</span>
+        <span class="text-slate-300">[{{ v.verdict }} · {{ v.score }}/10]</span>
+        <span class="text-slate-400">{{ v.overall }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
+  {# ─── the 3 user buttons (only when artifact exists & not actively running OR done) ─── #}
+  {% if artifact_path %}
+  <div class="rounded-lg border-2 border-emerald-500/40 bg-emerald-950/20 px-5 py-4 space-y-3">
+    <div class="flex items-baseline gap-2">
+      <span class="text-base">🎬</span>
+      <span class="text-sm font-semibold text-emerald-200">你的选择</span>
+    </div>
+
+    <div class="flex flex-wrap gap-2">
+      {# ✅ satisfied → accept_opendesign → phase 3 #}
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/opendesign/satisfied"
+            hx-target="#action-result" hx-swap="innerHTML"
+            class="inline-block">
+        <button type="submit"
+                class="inline-flex items-center gap-2 px-4 py-2 bg-emerald-500/30 hover:bg-emerald-500/50 border border-emerald-400/60 text-emerald-100 rounded font-semibold">
+          <span>✅</span><span>满意 → 进 Phase 3</span>
+        </button>
+      </form>
+
+      {# 🔄 unsatisfied → re-fire critic loop (no hint) #}
+      <form hx-post="/runs/{{ project }}/{{ run_id }}/opendesign/critic_loop"
+            hx-target="#action-result" hx-swap="innerHTML"
+            class="inline-block">
+        <button type="submit"
+                {% if running %}disabled{% endif %}
+                class="inline-flex items-center gap-2 px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 rounded
+                       disabled:opacity-40 disabled:cursor-not-allowed">
+          <span>🔄</span><span>不满意 · 让 critic 再改一轮</span>
+        </button>
+      </form>
+    </div>
+
+    {# 📝 user feedback hint #}
+    <form hx-post="/runs/{{ project }}/{{ run_id }}/opendesign/critic_loop"
+          hx-target="#action-result" hx-swap="innerHTML"
+          class="space-y-2">
+      <label class="block text-xs text-slate-400">📝 给 critic 加一条具体要求（中英都行）：</label>
+      <div class="flex gap-2">
+        <input type="text" name="user_hint" placeholder="如『字小一点』『换金黑配色』『去掉粒子滤镜』..."
+               class="flex-1 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-3 py-1.5 text-sm font-mono text-slate-200 placeholder-slate-600"/>
+        <button type="submit"
+                {% if running %}disabled{% endif %}
+                class="px-4 py-1.5 bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-sky-300 rounded text-sm
+                       disabled:opacity-40 disabled:cursor-not-allowed">
+          带上提示再跑一轮
+        </button>
+      </div>
+    </form>
+  </div>
+  {% endif %}
+
+</div>
+
+{# Auto-refresh: poll every 3s while running, otherwise stop. #}
+{% if running or stage == 'starting' %}
+<div hx-get="/runs/{{ project }}/{{ run_id }}/opendesign/critic_panel"
+     hx-trigger="every 3s"
+     hx-target="#od-critic-root" hx-swap="innerHTML"></div>
+{% endif %}

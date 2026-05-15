@@ -355,9 +355,13 @@ def run_project_analyzer(repo_dir: Path,
         write_progress(step + 1, "→ LLM (waiting response)")
         from .error_agent import llm_call_with_recovery
         resp = llm_call_with_recovery(
+            # thinking={"type":"disabled"} — glm-5.1 otherwise burns max_tokens
+            # on hidden reasoning, ending the loop with no tool_use emitted
+            # and no submit_brief ever called. Same fix as quality_judge.py.
             lambda: client.messages.create(
                 model=model,
                 max_tokens=8192,
+                thinking={"type": "disabled"},
                 system=_system_prompt(mode, run_dir=output_path.parent),
                 tools=TOOLS,
                 messages=messages,

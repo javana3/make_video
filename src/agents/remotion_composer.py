@@ -119,8 +119,8 @@ TOOLS = [
             "properties": {
                 "summary": {"type": "string", "description": "1-sentence overview."},
                 "fps": {"type": "integer", "description": "Render fps; use 30."},
-                "resolution_w": {"type": "integer", "description": "Render width; use 1920."},
-                "resolution_h": {"type": "integer", "description": "Render height; use 1080."},
+                "resolution_w": {"type": "integer", "description": "Render width; use 1080 (vertical 9:16)."},
+                "resolution_h": {"type": "integer", "description": "Render height; use 1920 (vertical 9:16)."},
                 "scenes": {
                     "type": "array",
                     "minItems": 3,
@@ -218,8 +218,9 @@ def _validate_plan(plan: dict, available_assets: dict) -> str:
     fps = plan.get("fps")
     if fps != 30:
         return f"ERROR: fps must be 30, got {fps}. Remotion compositions use 30fps."
-    if plan.get("resolution_w") != 1920 or plan.get("resolution_h") != 1080:
-        return "ERROR: resolution must be 1920x1080 for promo videos"
+    if plan.get("resolution_w") != 1080 or plan.get("resolution_h") != 1920:
+        return ("ERROR: resolution must be 1080x1920 (vertical 9:16 portrait, "
+                "Douyin/TikTok format) for promo videos")
 
     scenes = plan.get("scenes") or []
     if len(scenes) < 3:
@@ -490,9 +491,13 @@ def run_cutting_planner(run_dir: Path,
         # never emitting a valid emit_cutting_plan tool call.
         from .error_agent import llm_call_with_recovery
         resp = llm_call_with_recovery(
+            # thinking={"type":"disabled"} — glm-5.1 otherwise burns the
+            # max_tokens budget on hidden reasoning, never emitting the
+            # emit_cutting_plan tool_use. Same fix as quality_judge.py.
             lambda: client.messages.create(
                 model=model,
                 max_tokens=16384,
+                thinking={"type": "disabled"},
                 system=effective_system_prompt,
                 tools=TOOLS,
                 messages=messages,

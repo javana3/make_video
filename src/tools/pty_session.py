@@ -180,6 +180,16 @@ class PtySession:
         self._screen_lock = threading.Lock()
         self._reader_thread: Optional[threading.Thread] = None
         self._sampler_thread: Optional[threading.Thread] = None
+        # Full transcript of every byte read from the child process — lives
+        # next to frames_dir. Lets the agent see the COMPLETE history including
+        # tracebacks/crash output that have scrolled off the 100x30 screen.
+        self._transcript_path: Optional[Path] = None
+        self._transcript_fp = None
+        self._transcript_lock = threading.Lock()
+        # Restart counter — agent can request pty_restart with different env
+        # or args after diagnosing a crash. Each restart writes a marker line
+        # into transcript so the timeline is still legible.
+        self._restart_count = 0
 
         font_path = _find_mono_font()
         self._font = (ImageFont.truetype(font_path, font_size)
@@ -204,6 +214,17 @@ class PtySession:
             shutil.rmtree(self.frames_dir)
         self.frames_dir.mkdir(parents=True)
 
+        # Transcript lives next to the frames_dir so it survives the run
+        # even after frames are deleted during ffmpeg compose. Append-only.
+        if self._transcript_path is None:
+            self._transcript_path = self.frames_dir.parent / "pty_transcript.log"
+            # Truncate on FIRST spawn only; restarts append.
+            self._transcript_fp = self._transcript_path.open("ab")
+        self._write_transcript_marker(
+            f"=== spawn cmd={self.command} cwd={self.cwd} "
+            f"env_overrides={list((self.env or {}).keys())} ==="
+        )
+
         self.log.info(f"spawn {self.command}  cwd={self.cwd}")
         self._t0 = time.monotonic()
         self.started_at_iso = datetime.now(timezone.utc).isoformat()
@@ -223,6 +244,16 @@ class PtySession:
         self._reader_thread.start()
         self._sampler_thread.start()
 
+    def _write_transcript_marker(self, text: str) -> None:
+        with self._transcript_lock:
+            if self._transcript_fp is not None:
+                try:
+                    ts = f"\n[{datetime.now(timezone.utc).isoformat()}] {text}\n"
+                    self._transcript_fp.write(ts.encode("utf-8"))
+                    self._transcript_fp.flush()
+                except Exception:
+                    pass
+
     # ─── background loops ──────────────────────────────────────────────
     def _reader_loop(self) -> None:
         assert self._proc is not None
@@ -232,6 +263,16 @@ class PtySession:
                 if not chunk:
                     break
                 self._n_bytes += len(chunk)
+                # Persist raw bytes to transcript BEFORE pyte processing so
+                # the agent can later see tracebacks/error output even after
+                # the 100x30 screen buffer has scrolled past them.
+                with self._transcript_lock:
+                    if self._transcript_fp is not None:
+                        try:
+                            self._transcript_fp.write(chunk)
+                            self._transcript_fp.flush()
+                        except Exception:
+                            pass
                 try:
                     text = chunk.decode("utf-8", errors="replace")
                     with self._screen_lock:
@@ -282,6 +323,113 @@ class PtySession:
         text = self.screen_text()
         lines = text.split("\n")
         return "\n".join(lines[-n_lines:])
+
+    def transcript(self, tail_lines: Optional[int] = None,
+                   head_lines: Optional[int] = None,
+                   max_bytes: int = 64_000) -> str:
+        """Return the FULL captured stdout/stderr history of the process(es)
+        spawned in this session, including past tracebacks/crash output that
+        the 100x30 pyte screen has already scrolled past.
+
+        Includes restart markers between sessions if pty_restart was used.
+        Capped at `max_bytes` from whichever end the caller asked for.
+        """
+        if self._transcript_path is None or not self._transcript_path.exists():
+            return "(transcript not yet written)"
+        # Flush current writer so most recent bytes are visible to the reader.
+        with self._transcript_lock:
+            if self._transcript_fp is not None:
+                try:
+                    self._transcript_fp.flush()
+                except Exception:
+                    pass
+        try:
+            data = self._transcript_path.read_bytes()
+        except Exception as e:
+            return f"(read transcript failed: {e})"
+        text = data.decode("utf-8", errors="replace")
+        lines = text.split("\n")
+        if tail_lines is not None and tail_lines > 0:
+            lines = lines[-tail_lines:]
+        elif head_lines is not None and head_lines > 0:
+            lines = lines[:head_lines]
+        out = "\n".join(lines)
+        if len(out) > max_bytes:
+            # Always prefer the tail when truncating — that's usually where
+            # the most recent error is.
+            out = "...[truncated]...\n" + out[-max_bytes:]
+        return out
+
+    def restart(self, extra_env: Optional[dict] = None,
+                extra_args: Optional[list] = None,
+                replace_args: Optional[list] = None) -> dict:
+        """Kill the current child process and respawn it.
+
+        Use cases for the agent:
+          - Project crashed with a Windows GBK encoding issue → restart with
+            extra_env={"PYTHONIOENCODING": "utf-8"}
+          - Program took a CLI flag wrong → restart with extra_args=["--help"]
+          - Different starting subcommand entirely → replace_args=["python","-u","tests/smoke.py"]
+
+        The video recording (frames) CONTINUES across the restart so the
+        crash + restart + recovery is one continuous demo. The transcript
+        gets a clearly-marked separator line.
+        """
+        if self._proc is None:
+            raise RuntimeError("session never started")
+        # Kill the current process gently
+        if self.is_alive():
+            try:
+                self._proc.terminate()
+                try:
+                    self._proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self._proc.kill()
+                    self._proc.wait(timeout=2)
+            except Exception:
+                pass
+        # Wait briefly for reader to drain stdout fully
+        if self._reader_thread and self._reader_thread.is_alive():
+            self._reader_thread.join(timeout=2)
+        self._restart_count += 1
+        # Merge env / args
+        merged_env = dict(self.env or {})
+        if extra_env:
+            merged_env.update(extra_env)
+        self.env = merged_env
+        if replace_args is not None:
+            self.command = list(replace_args)
+        elif extra_args:
+            self.command = list(self.command) + list(extra_args)
+        # Reset pyte screen so the agent sees a clean terminal for the new run
+        with self._screen_lock:
+            self._screen.reset()
+        self._write_transcript_marker(
+            f"=== restart #{self._restart_count}: cmd={self.command} "
+            f"env_overrides={list((self.env or {}).keys())} ==="
+        )
+        # Respawn without clearing frames_dir (keep the video continuous).
+        # We can't call self._spawn() directly because it wipes frames_dir,
+        # so inline the relevant bits:
+        self._proc = subprocess.Popen(
+            self.command,
+            cwd=str(self.cwd),
+            env={**os.environ, **(self.env or {})},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, name=f"pty-reader-r{self._restart_count}",
+            daemon=True)
+        self._reader_thread.start()
+        return {
+            "restart_count": self._restart_count,
+            "command": self.command,
+            "env_overrides": list((self.env or {}).keys()),
+            "pid": self._proc.pid,
+        }
 
     def wait_for(self, pattern: str, timeout_s: float = 30.0,
                  poll_interval_s: float = 0.2) -> bool:
@@ -340,6 +488,15 @@ class PtySession:
             for th in (self._reader_thread, self._sampler_thread):
                 if th and th.is_alive():
                     th.join(timeout=3)
+
+            # Close the transcript file (already flushed by each write).
+            with self._transcript_lock:
+                if self._transcript_fp is not None:
+                    try:
+                        self._transcript_fp.close()
+                    except Exception:
+                        pass
+                    self._transcript_fp = None
 
             return self._render_mp4(output_path, keep_frames=keep_frames)
 

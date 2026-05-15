@@ -54,7 +54,23 @@ ITERATION ORDER (do not skip steps)
               sh` (note: validator rejects `curl|sh` — prefer `rustup-init`
               or the OS package). Detect OS first if needed; the env
               section of the user message tells you the platform.
-6. Identify ONE OR MORE services to start. Pick health URLs.
+6. Decide what KIND of project this is and set `demo_mode`:
+   - **`demo_mode = "web"`** if the project's user-facing surface is a web
+     UI (browser app, dashboard, HTML page served by a local http server).
+     Then list the http server(s) under `services` — each entry needs a
+     real `health_url` on http://127.0.0.1:<port>/.
+   - **`demo_mode = "cli"`** if the project's user-facing surface is a
+     terminal program (REPL, TUI, console game, command-line tool). In
+     this case `services` is typically **`[]`** — do NOT invent a fake
+     Flask/HTTP listener just to fill the array; it forces the next
+     Demo Driver to open a browser on a blank "OK" page, which is wrong.
+     Set `demo_command` to the shell command that runs the program
+     (e.g. `python -u main.py`, `cargo run --example demo`). Optional
+     `demo_cwd` defaults to repo root.
+   - You DECIDE based on what the project actually IS. Read the README,
+     the entry point file, the brief. If unsure, lean on the brief:
+     a "CLI" / "terminal" / "console" project = cli; everything with a
+     served URL = web.
 7. Call `submit_plan` exactly once.
 
 ═══════════════════════════════════════════════════════════════════
@@ -106,6 +122,14 @@ SCHEMA RULES (host-enforced; violation = ERROR + retry)
 - Real safety bans: no `rm -rf /`, no `sudo`, no `format C:`, no fork
   bombs, no blind `curl URL | sh`, no `shutdown`/`reboot`. The validator
   will reject these and you must rewrite.
+- **Windows shell quoting gotcha**: DO NOT use `python -c "..."` (or `node -e`,
+  `ruby -e`, etc.) with multi-statement bodies that contain quotes inside.
+  Windows cmd.exe breaks on nested quotes — Python receives the body half-eaten
+  and crashes with "unterminated string literal". For any non-trivial inline
+  script (db seed, schema init, batch import …), use `config_writes` to drop
+  a small `_seed.py` (or `_init.py`) into the repo, then run it via
+  `python _seed.py`. ONE-line bodies with no inner quotes are fine; multi-
+  statement bodies must go through a file.
 
 ═══════════════════════════════════════════════════════════════════
 TONE & SCOPE
@@ -266,7 +290,12 @@ TOOLS = [
                 },
                 "services": {
                     "type": "array",
-                    "description": "Long-running services to start in background. ≥ 1.",
+                    "description": (
+                        "Long-running services to start in background. "
+                        "USE [] for pure CLI projects (no http server) — do NOT "
+                        "invent a fake health endpoint just to fill this array. "
+                        "If you set demo_mode='cli', services is typically []."
+                    ),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -280,9 +309,41 @@ TOOLS = [
                         "required": ["name", "command", "cwd", "port", "health_url", "purpose"],
                     },
                 },
+                "demo_mode": {
+                    "type": "string",
+                    "enum": ["web", "cli"],
+                    "description": (
+                        "How the next-phase Demo Driver agent should drive this "
+                        "project to record a demo: 'web' = open the running "
+                        "service URL in headless Chromium and use browser_* "
+                        "tools; 'cli' = launch demo_command in a pty and use "
+                        "pty_* tools. YOU pick based on what the project IS: "
+                        "if the user-facing surface is a web UI, pick 'web'; "
+                        "if it's a terminal CLI (REPL, TUI, console program), "
+                        "pick 'cli'. Pure-API services with no UI: pick 'cli' "
+                        "and provide a demo_command that exercises the API."
+                    ),
+                },
+                "demo_command": {
+                    "type": "string",
+                    "description": (
+                        "For demo_mode='cli' ONLY: shell command the Demo "
+                        "Driver should launch in a pty to demo the project "
+                        "(e.g. 'python -u main.py', 'cargo run --example demo'). "
+                        "Run from repo root unless overridden by demo_cwd. "
+                        "OMIT if demo_mode='web'."
+                    ),
+                },
+                "demo_cwd": {
+                    "type": "string",
+                    "description": (
+                        "For demo_mode='cli' ONLY: repo-relative cwd for "
+                        "demo_command. Defaults to '.' (repo root)."
+                    ),
+                },
                 "notes": {"type": "string"},
             },
-            "required": ["summary", "install_commands", "services"],
+            "required": ["summary", "install_commands", "services", "demo_mode"],
         },
     },
 ]
@@ -473,9 +534,31 @@ def _validate_plan(repo_dir: Path, plan: dict) -> str:
     manual = plan.get("manual_prereqs") or []
     config_writes = plan.get("config_writes") or []
     notes = plan.get("notes") or ""
+    demo_mode = plan.get("demo_mode") or ""
+    demo_command = plan.get("demo_command") or ""
 
-    if not isinstance(services, list) or len(services) < 1:
-        return "ERROR: `services` must be a non-empty array (at least one service to start)."
+    # IRON LAW: no state machines. Agent decides whether project has any
+    # service to launch. CLI apps legitimately have services=[] — the next
+    # phases (demo_mode below) know how to handle that. Only enforce structure.
+    if not isinstance(services, list):
+        return "ERROR: `services` must be a list (use [] if the project is pure CLI)."
+
+    # demo_mode: agent MUST declare. We don't auto-infer in the pipeline —
+    # the planner is the only thing that knows whether the user-facing
+    # surface is a web UI or a terminal program.
+    if demo_mode not in ("web", "cli"):
+        return ("ERROR: `demo_mode` must be 'web' or 'cli'. You decide based on "
+                "what the project actually IS — a web UI gets 'web', a terminal/"
+                "REPL/TUI gets 'cli'. Do NOT pick 'web' just because you added a "
+                "fake health endpoint; pick what the user would actually demo.")
+    if demo_mode == "cli" and not demo_command.strip():
+        return ("ERROR: demo_mode='cli' requires `demo_command` (the command the "
+                "Demo Driver will launch in a pty to demonstrate the project, "
+                "e.g. 'python -u main.py').")
+    if demo_mode == "web" and len(services) == 0:
+        return ("ERROR: demo_mode='web' requires at least one entry in `services` "
+                "(the http server the browser will open). If there's no http "
+                "server, use demo_mode='cli' and provide demo_command.")
 
     # manual_prereqs: only schema-validated (list of strings). Content is
     # agent's call — if it truly can't auto-install (e.g., GPU driver), it
@@ -489,7 +572,16 @@ def _validate_plan(repo_dir: Path, plan: dict) -> str:
     # ─── HARD CONSTRAINT C: config_writes coverage ──────────────────────
     if not isinstance(config_writes, list):
         return "ERROR: config_writes must be a list"
-    cw_paths = {(c.get("path") or "").strip().lstrip("./").replace("\\", "/")
+    # BUG fix: `.lstrip("./")` takes a *set of chars* and was eating the
+    # leading `.` from dotfiles (".env" → "env"), causing the coverage
+    # check below to always reject .env.example coverage even when the
+    # agent's submitted path was exactly correct. Use removeprefix instead.
+    def _norm_path(p: str) -> str:
+        p = p.strip().replace("\\", "/")
+        if p.startswith("./"):
+            p = p[2:]
+        return p
+    cw_paths = {_norm_path(c.get("path") or "")
                 for c in config_writes if isinstance(c, dict)}
     examples = _detect_config_examples(repo_dir)
     missing: list[str] = []
@@ -653,8 +745,14 @@ def _call_with_warning(*, client, model: str, max_tokens: int,
                             name=f"watchdog-step{step}")
     wd.start()
     try:
+        # `thinking={"type": "disabled"}` — official Anthropic SDK extended-thinking
+        # parameter; ARK passes it through to glm-5.1. Without this, glm-5.1 spends
+        # the entire max_tokens budget on hidden reasoning text and emits zero
+        # tool_use blocks, so the planner loop ends without ever submitting a plan.
+        # Same fix as quality_judge.py:236.
         resp = client.messages.create(
             model=model, max_tokens=max_tokens, system=system,
+            thinking={"type": "disabled"},
             tools=tools, messages=messages,
         )
         elapsed = _time.monotonic() - start
